@@ -31,7 +31,8 @@
 - Create: `package.json`
 - Create: `pnpm-workspace.yaml`
 - Create: `.editorconfig`
-- Modify: `.gitignore` (already exists; add monorepo-specific entries)
+
+> Note: the root `.gitignore` already includes the monorepo entries (`node_modules/`, `.next/`, `__pycache__/`, `.venv/`, etc.) from the initial repo setup. No `.gitignore` changes are required in this task.
 
 - [ ] **Step 1: Create empty directory markers**
 
