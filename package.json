@@ -1,0 +1,16 @@
+{
+  "name": "mental-wellbeing-companion",
+  "private": true,
+  "version": "0.0.0",
+  "packageManager": "pnpm@9.12.0",
+  "engines": {
+    "node": ">=20.11.0",
+    "pnpm": ">=9.0.0"
+  },
+  "scripts": {
+    "dev:web": "pnpm --filter @mwc/web dev",
+    "dev:api": "cd apps/api && uv run uvicorn app.main:app --reload --port 8000",
+    "lint": "pnpm -r lint",
+    "typecheck": "pnpm -r typecheck"
+  }
+}
