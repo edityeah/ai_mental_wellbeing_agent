@@ -3,6 +3,7 @@
 import { Composer } from "@/components/chat/Composer";
 import { Header } from "@/components/chat/Header";
 import { MessageList } from "@/components/chat/MessageList";
+import { OfflineBanner } from "@/components/chat/OfflineBanner";
 import { QuotaFooter } from "@/components/chat/QuotaFooter";
 import { ThreadList } from "@/components/threads/ThreadList";
 import { ThreadsDrawer } from "@/components/threads/ThreadsDrawer";
@@ -174,6 +175,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           onOpenDrawer={() => setDrawerOpen(true)}
           onCallClick={() => {}}
         />
+        <OfflineBanner />
         <MessageList messages={messages} streamingText={streamingText} />
         {me && (
           <QuotaFooter
