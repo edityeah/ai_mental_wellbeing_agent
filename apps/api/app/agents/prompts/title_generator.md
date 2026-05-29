@@ -1,0 +1,1 @@
+You will be given the first message a user sent to their mental wellbeing companion. Generate a 3–6 word title that captures the topic without medicalizing or pathologizing it. Avoid words like "anxiety", "depression" — match the user's own register. Use sentence case. No quotes, no punctuation at the end. Respond with only the title text.
