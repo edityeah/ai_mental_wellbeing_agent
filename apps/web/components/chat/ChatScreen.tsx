@@ -26,7 +26,12 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   const [activeId, setActiveId] = useState<string | null>(initialId);
   const [activeConv, setActiveConv] = useState<ConversationOut | null>(null);
   const [messages, setMessages] = useState<MessageOut[]>([]);
+
+  // What's currently being streamed (null = no stream in flight).
+  // Empty string = waiting for first token (shows "thinking" bubble).
+  // Non-empty = render as a normal bubble that grows.
   const [streamingText, setStreamingText] = useState<string | null>(null);
+
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
@@ -74,6 +79,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     if (!activeId) return;
     setSending(true);
     setSendError(null);
+
     // Optimistic user message
     const tempId = `tmp-${Date.now()}`;
     setMessages((prev) => [
@@ -88,7 +94,9 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
       },
     ]);
 
+    // Empty string → "Companion is thinking…" bubble
     setStreamingText("");
+
     let assistantMsgId: string | null = null;
     let isCrisis = false;
     let collected = "";
@@ -105,9 +113,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           collected += ev.text;
           setStreamingText(collected);
         } else if (ev.type === "done") {
-          // commit to messages list
-          setStreamingText(null);
-          if (assistantMsgId) {
+          // Commit the message and clear streaming state.
+          if (assistantMsgId && collected.length > 0) {
             setMessages((prev) => [
               ...prev,
               {
@@ -120,20 +127,41 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
               },
             ]);
           }
+          setStreamingText(null);
         } else if (ev.type === "error") {
           setStreamingText(null);
           if (ev.error === "daily_cap_reached") {
-            setSendError(
-              "You've reached today's limit — see you tomorrow.",
-            );
+            setSendError("You've reached today's limit — see you tomorrow.");
           } else {
             setSendError("Something's off. Try again in a moment.");
           }
+          return;
         }
       }
-      // Refresh /me to update the quota counter.
+
+      // Safety: if the loop ended without an explicit "done", still commit
+      // whatever we collected and clear the streaming bubble.
+      if (collected.length > 0 && assistantMsgId) {
+        setMessages((prev) => {
+          // Avoid double-add if "done" already committed it.
+          if (prev.some((m) => m.id === assistantMsgId)) return prev;
+          return [
+            ...prev,
+            {
+              id: assistantMsgId!,
+              role: isCrisis ? "system_crisis" : "assistant",
+              source: "text",
+              content: collected,
+              risk_level: null,
+              created_at: new Date().toISOString(),
+            },
+          ];
+        });
+      }
+      setStreamingText(null);
+
+      // Refresh /me + conversations (for the auto-generated title)
       setMe(await api.me());
-      // Refresh conversation title (it may have been auto-generated).
       const convs = await api.listConversations();
       setConversations(convs);
     } catch (e) {
@@ -176,7 +204,10 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           onCallClick={() => {}}
         />
         <OfflineBanner />
-        <MessageList messages={messages} streamingText={streamingText} />
+        <MessageList
+          messages={messages}
+          streamingText={streamingText}
+        />
         {me && (
           <QuotaFooter
             used={me.today_text_msg_count}

@@ -40,7 +40,7 @@ async def classify(message: str, *, history: list[HistoryTurn]) -> SafetyResult:
         response = await asyncio.wait_for(
             client.messages.create(
                 model=settings.anthropic_haiku_model,
-                max_tokens=200,
+                max_tokens=80,  # output is ~30-50 tokens; tight budget cuts latency
                 system=system,
                 messages=[{"role": "user", "content": user_text}],
             ),
@@ -55,8 +55,22 @@ async def classify(message: str, *, history: list[HistoryTurn]) -> SafetyResult:
         return SafetyResult(risk="elevated", reason="classifier error (fallback)")
 
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(_strip_code_fences(text))
         return SafetyResult.model_validate(parsed)
     except Exception as e:
         logger.warning("safety_classifier_parse_failed text=%r exc=%s", text, e)
         return SafetyResult(risk="elevated", reason="classifier parse failed (fallback)")
+
+
+def _strip_code_fences(text: str) -> str:
+    """Claude often wraps JSON in ```json ... ``` fences despite being told not to."""
+    t = text.strip()
+    if t.startswith("```"):
+        # Drop first line (``` or ```json) and trailing ```
+        lines = t.splitlines()
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return t

@@ -31,6 +31,15 @@ const config: Config = {
       borderRadius: {
         bubble: "1rem",
       },
+      keyframes: {
+        "typing-dot": {
+          "0%, 60%, 100%": { opacity: "0.3", transform: "translateY(0)" },
+          "30%": { opacity: "1", transform: "translateY(-3px)" },
+        },
+      },
+      animation: {
+        "typing-dot": "typing-dot 1.2s ease-in-out infinite",
+      },
     },
   },
   plugins: [],

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from collections.abc import AsyncIterator
@@ -54,25 +55,30 @@ async def run_chat_turn(
 ) -> AsyncIterator[StreamHeader | str | StreamFooter]:
     """Drive a single chat turn.
 
+    OPTIMIZED FLOW: safety classifier and companion stream run **in parallel**.
+    Companion tokens are buffered until safety resolves:
+    - 'none' → flush + stream
+    - 'elevated' → discard speculative companion, restart with elevated prompt
+    - 'acute' → cancel companion, send crisis card
+
     Yields one StreamHeader, then 0..N text chunks, then one StreamFooter.
-    Persistence happens between yields.
     """
     settings = get_settings()
     today = datetime.now(tz=timezone.utc).date()
 
-    # 1. Ensure the conversation belongs to this user.
+    # 1. Validate conversation belongs to user.
     conv = await repos.get_conversation(
         session, conversation_id=conversation_id, user_id=user_id
     )
     if conv is None:
         raise LookupError("conversation not found")
 
-    # 2. Rate-limit check (raises before any work).
+    # 2. Rate-limit check.
     await consume_text_message_quota(
         session, user_id=user_id, today=today, cap=settings.daily_text_msg_cap
     )
 
-    # 3. Persist the user message immediately.
+    # 3. Persist the user message.
     user_msg = await repos.append_message(
         session,
         conversation_id=conversation_id,
@@ -84,85 +90,135 @@ async def run_chat_turn(
     )
     await session.commit()
 
-    # 4. Build history (excludes the just-persisted user message because we'll
-    #    pass it as the most recent turn explicitly).
+    # 4. Build history + load profile.
     history = await _load_history(session, conversation_id=conversation_id)
-
-    # 5. Safety classifier on the latest user message.
-    result: SafetyResult = await safety.classify(
-        user_text, history=history[:-1]  # exclude the latest, which is being classified
-    )
-    user_msg.risk_level = result.risk
-    await session.commit()
-
-    # 6. ACUTE → crisis card, stop here.
-    if result.risk == "acute":
-        crisis_msg: Message = await repos.append_message(
-            session,
-            conversation_id=conversation_id,
-            role="system_crisis",
-            content=CRISIS_CARD_TEXT,
-            source="text",
-            risk_level=None,
-            token_count=0,
-        )
-        await session.commit()
-        yield StreamHeader(
-            message_id=crisis_msg.id, risk="acute", kind="crisis_card"
-        )
-        yield CRISIS_CARD_TEXT
-        yield StreamFooter(total_tokens=0)
-        return
-
-    # 7. Load profile + summary.
     profile_row = await repos.get_or_create_profile(session, user_id=user_id)
     await session.commit()
 
-    # 8. Stream the Companion reply.
+    # 5. Persist empty pending assistant row + emit header immediately.
     pending_assistant = await repos.append_message(
         session,
         conversation_id=conversation_id,
         role="assistant",
-        content="",  # filled in after the stream
+        content="",
         source="text",
         risk_level=None,
         token_count=0,
     )
     await session.commit()
+    yield StreamHeader(message_id=pending_assistant.id, risk="pending", kind="normal")
 
-    yield StreamHeader(
-        message_id=pending_assistant.id, risk=result.risk, kind="normal"
+    # 6. Start safety classifier and companion stream IN PARALLEL.
+    safety_task = asyncio.create_task(
+        safety.classify(user_text, history=history[:-1])
     )
 
-    collected: list[str] = []
-    try:
+    async def _consume_companion(
+        risk: str,
+    ) -> AsyncIterator[str]:
         async for chunk in companion.stream_reply(
             history=history,
-            risk=result.risk,  # type: ignore[arg-type]
+            risk=risk,  # type: ignore[arg-type]
             source="text",
             profile=profile_row.profile,
             summary=profile_row.summary,
         ):
-            collected.append(chunk)
             yield chunk
-    except Exception as e:
-        logger.exception("companion_stream_failed: %s", e)
-        await session.delete(pending_assistant)
-        await session.commit()
-        yield "\n\n(Sorry — I had trouble responding. Please try again.)"
-        yield StreamFooter(total_tokens=0)
-        return
 
-    final_text = "".join(collected).strip()
+    companion_gen = _consume_companion("none")  # speculative — assume safest path
+    buffered: list[str] = []
+    final_chunks: list[str] = []
+    safety_resolved = False
+    safety_result: SafetyResult | None = None
+    companion_done = False
+
+    async def _next_token() -> tuple[str, str | None]:
+        try:
+            return ("token", await companion_gen.__anext__())
+        except StopAsyncIteration:
+            return ("done", None)
+
+    token_task = asyncio.create_task(_next_token())
+
+    while not companion_done:
+        wait_for: list[asyncio.Task] = [token_task]
+        if not safety_resolved:
+            wait_for.append(safety_task)
+
+        done, _pending = await asyncio.wait(
+            wait_for, return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # Handle safety resolution first if it just landed.
+        if not safety_resolved and safety_task in done:
+            safety_resolved = True
+            safety_result = safety_task.result()
+            user_msg.risk_level = safety_result.risk
+            await session.commit()
+
+            if safety_result.risk == "acute":
+                # Cancel speculative companion.
+                token_task.cancel()
+                try:
+                    await companion_gen.aclose()
+                except Exception:
+                    pass
+                # Persist crisis card as system_crisis, drop the empty assistant.
+                crisis_msg = await repos.append_message(
+                    session,
+                    conversation_id=conversation_id,
+                    role="system_crisis",
+                    content=CRISIS_CARD_TEXT,
+                    source="text",
+                    risk_level=None,
+                    token_count=0,
+                )
+                await session.delete(pending_assistant)
+                await session.commit()
+                yield StreamHeader(
+                    message_id=crisis_msg.id, risk="acute", kind="crisis_card"
+                )
+                yield CRISIS_CARD_TEXT
+                yield StreamFooter(total_tokens=0)
+                return
+
+            if safety_result.risk == "elevated":
+                # Speculative companion used 'none' prompt — restart with elevated.
+                token_task.cancel()
+                try:
+                    await companion_gen.aclose()
+                except Exception:
+                    pass
+                buffered = []
+                companion_gen = _consume_companion("elevated")
+                token_task = asyncio.create_task(_next_token())
+                continue
+
+            # safety = 'none' → flush any buffered tokens.
+            for tok in buffered:
+                final_chunks.append(tok)
+                yield tok
+            buffered = []
+
+        # Handle the next companion token (if it landed).
+        if token_task in done:
+            kind, value = token_task.result()
+            if kind == "done":
+                companion_done = True
+                break
+            assert value is not None
+            if safety_resolved:
+                final_chunks.append(value)
+                yield value
+            else:
+                buffered.append(value)
+            token_task = asyncio.create_task(_next_token())
+
+    # 7. Save final reply.
+    final_text = "".join(final_chunks).strip()
     pending_assistant.content = final_text
     pending_assistant.token_count = max(1, len(final_text) // 4)
     await session.commit()
-
-    # 9. Auto-title on first user message in this conversation.
-    if conv.title == "New conversation":
-        new_title = await title_gen.generate_title(user_text)
-        conv.title = new_title
-        await session.commit()
 
     yield StreamFooter(total_tokens=pending_assistant.token_count)
 
@@ -211,4 +267,25 @@ async def maybe_run_profile_updater(
     profile_row.profile = update.profile
     profile_row.summary = update.summary
     profile_row.last_processed_msg_id = msgs[-1].id
+    await session.commit()
+
+
+async def maybe_generate_title(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    first_user_text: str,
+) -> None:
+    """Generate an auto-title for a conversation if it still has the default title.
+
+    Runs as a background task so it doesn't extend the chat-turn latency.
+    """
+    conv = await repos.get_conversation(
+        session, conversation_id=conversation_id, user_id=user_id
+    )
+    if conv is None or conv.title != "New conversation":
+        return
+    new_title = await title_gen.generate_title(first_user_text)
+    conv.title = new_title
     await session.commit()

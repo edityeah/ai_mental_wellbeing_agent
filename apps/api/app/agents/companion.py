@@ -52,6 +52,6 @@ async def stream_reply(
         messages=history,
     )
     async with stream_cm as stream:
-        async for chunk in stream.text_stream():
+        async for chunk in stream.text_stream:
             if chunk:
                 yield chunk

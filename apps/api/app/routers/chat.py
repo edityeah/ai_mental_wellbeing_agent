@@ -17,6 +17,7 @@ from app.schemas.chat import ChatRequest
 from app.services.chat_service import (
     StreamFooter,
     StreamHeader,
+    maybe_generate_title,
     maybe_run_profile_updater,
     run_chat_turn,
 )
@@ -82,9 +83,19 @@ async def chat(
     except Exception as e:
         logger.exception("rate_check_pre_failed: %s", e)
 
-    # Schedule the background profile update to run *after* the response completes.
+    # Schedule background work to run *after* the response completes.
     async def _post_response():
         sm = get_sessionmaker()
+        async with sm() as bg_session:
+            try:
+                await maybe_generate_title(
+                    bg_session,
+                    user_id=claims.user_id,
+                    conversation_id=body.conversation_id,
+                    first_user_text=body.content,
+                )
+            except Exception as e:
+                logger.exception("title_bg_failed: %s", e)
         async with sm() as bg_session:
             try:
                 await maybe_run_profile_updater(
