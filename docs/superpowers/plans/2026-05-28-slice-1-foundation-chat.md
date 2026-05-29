@@ -5429,6 +5429,7 @@ import type {
   MessageOut,
 } from "@/lib/api/types";
 import { useRouter } from "next/navigation";
+import type { Route } from "next";
 import { useEffect, useState } from "react";
 
 export function ChatScreen({ initialId }: { initialId: string | null }) {
@@ -5463,7 +5464,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           setConversations([created]);
           id = created.id;
         }
-        router.replace(`/chat/${id}`);
+        router.replace(`/chat/${id}` as Route);
         setActiveId(id);
       }
     })().catch(console.error);
@@ -5562,7 +5563,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     setConversations((prev) => [c, ...prev]);
     setActiveId(c.id);
     setDrawerOpen(false);
-    router.replace(`/chat/${c.id}`);
+    router.replace(`/chat/${c.id}` as Route);
   }
 
   const capReached = me ? me.today_text_msg_count >= me.daily_text_msg_cap : false;
@@ -5576,7 +5577,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           onPick={(id) => {
             setActiveId(id);
             setDrawerOpen(false);
-            router.replace(`/chat/${id}`);
+            router.replace(`/chat/${id}` as Route);
           }}
           onNew={handleNewConversation}
         />
