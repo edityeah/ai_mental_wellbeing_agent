@@ -1,0 +1,26 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  @apply bg-cream text-ink font-sans antialiased;
+}
+
+@supports (-webkit-touch-callout: none) {
+  /* iOS: use dynamic viewport so the keyboard doesn't push the composer off-screen */
+  .h-screen-dvh {
+    height: 100dvh;
+  }
+}
+.h-screen-dvh {
+  height: 100dvh;
+}
