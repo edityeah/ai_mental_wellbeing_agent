@@ -1782,8 +1782,14 @@ def _set_jwks_url(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5-20251001")
     monkeypatch.setenv("SUPABASE_URL", "https://test.supabase.co")
     monkeypatch.setenv("SUPABASE_ANON_KEY", "anon")
-    # bust cached settings + jwks
+    # bust cached settings + jwks BEFORE the test runs
     from app import auth, settings as settings_mod
+    settings_mod.get_settings.cache_clear()
+    auth._jwks_cache.clear()
+    yield
+    # CRITICAL: monkeypatch restores env vars at teardown, but the cached
+    # Settings instance survives. Clear caches AFTER the test too so the next
+    # test reads the real .env (live-DB tests will fail otherwise).
     settings_mod.get_settings.cache_clear()
     auth._jwks_cache.clear()
 
@@ -1972,6 +1978,10 @@ def _env(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_COMPANION_MODEL", "claude-sonnet-4-6")
     monkeypatch.setenv("ANTHROPIC_HAIKU_MODEL", "claude-haiku-4-5-20251001")
     from app import auth, settings as settings_mod
+    settings_mod.get_settings.cache_clear()
+    auth._jwks_cache.clear()
+    yield
+    # Clear caches AFTER test too so subsequent live-DB tests read real .env.
     settings_mod.get_settings.cache_clear()
     auth._jwks_cache.clear()
 
