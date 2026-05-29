@@ -28,6 +28,10 @@ def _set_jwks_url(monkeypatch):
     from app import auth, settings as settings_mod
     settings_mod.get_settings.cache_clear()
     auth._jwks_cache.clear()
+    yield
+    # restore cache state so other tests pick up real .env values
+    settings_mod.get_settings.cache_clear()
+    auth._jwks_cache.clear()
 
 
 @pytest.mark.asyncio
