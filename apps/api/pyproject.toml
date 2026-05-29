@@ -26,6 +26,8 @@ dev = [
   "testcontainers[postgres]>=4.8",
   "ruff>=0.7",
   "mypy>=1.13",
+  "respx>=0.21",
+  "cryptography>=43.0",
 ]
 
 [tool.ruff]
