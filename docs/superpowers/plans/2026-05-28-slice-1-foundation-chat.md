@@ -2903,7 +2903,10 @@ async def update_profile(
         logger.warning("profile_updater_parse_failed text=%r exc=%s", text, e)
         return None
 
-    return ProfileUpdate(profile=profile_obj.model_dump(mode="json"), summary=summary)
+    return ProfileUpdate(
+        profile=profile_obj.model_dump(mode="json", exclude_defaults=True),
+        summary=summary,
+    )
 ```
 
 - [ ] **Step 4: Run tests, see them pass**
