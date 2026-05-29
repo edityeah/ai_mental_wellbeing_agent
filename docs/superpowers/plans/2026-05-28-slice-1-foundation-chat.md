@@ -3760,7 +3760,20 @@ async def test_chat_happy_path_streams_reply(
     assert "event: started" in body
     assert "event: token" in body
     assert "event: done" in body
-    assert "That sounds hard." in body
+
+    # Reassemble streamed tokens — each token is in a separate SSE data: line
+    # as JSON `{"text": "..."}`, so the substring won't be contiguous in body.
+    import json as _json
+    streamed = ""
+    for line in body.splitlines():
+        if line.startswith("data: "):
+            try:
+                payload = _json.loads(line[6:])
+                if isinstance(payload, dict) and "text" in payload:
+                    streamed += payload["text"]
+            except _json.JSONDecodeError:
+                pass
+    assert "That sounds hard." in streamed
 
 
 @pytest.mark.asyncio
