@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mwc-postgres
+    environment:
+      POSTGRES_USER: mwc
+      POSTGRES_PASSWORD: mwc_dev
+      POSTGRES_DB: mwc
+    ports:
+      - "5433:5432"
+    volumes:
+      - mwc-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mwc -d mwc"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  mwc-pgdata:
