@@ -1,8 +1,11 @@
 from fastapi import FastAPI
 
+from app.logging_setup import configure_logging
 from app.routers import chat as chat_router
 from app.routers import conversations as conversations_router
 from app.routers import me as me_router
+
+configure_logging()
 
 app = FastAPI(title="Mental Wellbeing Companion API", version="0.0.0")
 app.include_router(me_router.router, prefix="/api/v1", tags=["me"])
