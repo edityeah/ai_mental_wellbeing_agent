@@ -21,8 +21,20 @@ API_PID=$!
 ( cd apps/web && pnpm dev ) &
 WEB_PID=$!
 
-echo "→ to enable voice locally, run in a separate terminal: pnpm run dev:voice"
+VOICE_PID=
+if [[ "${START_VOICE:-0}" == "1" ]]; then
+  echo "→ starting voice-worker"
+  ( cd apps/voice-worker && uv run python -m worker.main dev ) &
+  VOICE_PID=$!
+else
+  echo "ℹ Voice worker is OFF. Enable with: START_VOICE=1 ./scripts/dev.sh"
+  echo "   (Requires LIVEKIT_*, DEEPGRAM_API_KEY, CARTESIA_API_KEY in apps/api/.env)"
+fi
 
-trap "echo '→ stopping'; kill $API_PID $WEB_PID 2>/dev/null || true" EXIT
+cleanup() {
+  echo "→ stopping"
+  kill $API_PID $WEB_PID ${VOICE_PID:-} 2>/dev/null || true
+}
+trap cleanup EXIT
 
 wait
