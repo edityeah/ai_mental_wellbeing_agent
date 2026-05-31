@@ -6,7 +6,7 @@ export function Header({
   title,
   onOpenDrawer,
   onCallClick,
-  callDisabled = true,
+  callDisabled = false,
 }: {
   title: string;
   onOpenDrawer: () => void;
@@ -28,7 +28,7 @@ export function Header({
       <button
         onClick={onCallClick}
         disabled={callDisabled}
-        title={callDisabled ? "Voice coming soon" : "Start voice call"}
+        title={callDisabled ? "Voice limit reached for today." : "Start voice call"}
         className={cn(
           "w-9 h-9 rounded-full flex items-center justify-center transition",
           callDisabled

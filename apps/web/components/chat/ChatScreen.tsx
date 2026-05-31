@@ -9,6 +9,7 @@ import { QuotaFooter } from "@/components/chat/QuotaFooter";
 import { RenameDialog } from "@/components/chat/RenameDialog";
 import { ThreadList } from "@/components/threads/ThreadList";
 import { ThreadsDrawer } from "@/components/threads/ThreadsDrawer";
+import { CallScreen } from "@/components/voice/CallScreen";
 import { api } from "@/lib/api/client";
 import { streamChat } from "@/lib/api/sse";
 import type {
@@ -37,6 +38,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+  const [callOpen, setCallOpen] = useState(false);
 
   // In-app dialogs (replaces window.prompt / window.confirm)
   const [renameTarget, setRenameTarget] = useState<{
@@ -319,7 +321,10 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         <Header
           title={activeConv?.title || "Wellbeing"}
           onOpenDrawer={() => setDrawerOpen(true)}
-          onCallClick={() => {}}
+          onCallClick={() => {
+            if (activeId) setCallOpen(true);
+          }}
+          callDisabled={!activeId}
         />
         <OfflineBanner />
         <MessageList
@@ -356,6 +361,22 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         title={deleteTarget?.title ?? ""}
         onCancel={() => setDeleteTarget(null)}
         onConfirm={commitDelete}
+      />
+
+      <CallScreen
+        open={callOpen}
+        conversationId={activeId}
+        onClose={() => setCallOpen(false)}
+        onCallEnded={async () => {
+          if (!activeId) return;
+          try {
+            const msgs = await api.listMessages(activeId);
+            setMessages(msgs);
+            setMe(await api.me());
+          } catch {
+            /* non-critical refresh */
+          }
+        }}
       />
     </>
   );
