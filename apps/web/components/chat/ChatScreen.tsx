@@ -338,6 +338,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           <QuotaFooter
             used={me.today_text_msg_count}
             cap={me.daily_text_msg_cap}
+            voiceUsedSeconds={me.voice_seconds_used_today}
+            voiceCapSeconds={me.voice_seconds_cap}
           />
         )}
         <Composer
