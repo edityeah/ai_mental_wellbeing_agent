@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Room,
   RoomEvent,
@@ -13,6 +13,7 @@ import { requestVoiceToken } from "@/lib/api/voice";
 import { cn } from "@/lib/cn";
 
 type CallState = "idle" | "requesting" | "connecting" | "connected" | "ending" | "error";
+type ErrorKind = "mic_permission" | "no_mic" | "generic";
 
 interface Props {
   open: boolean;
@@ -25,85 +26,104 @@ interface Props {
 export function CallScreen({ open, conversationId, onClose, onCallEnded }: Props) {
   const [state, setState] = useState<CallState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [errorKind, setErrorKind] = useState<ErrorKind | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const [muted, setMuted] = useState(false);
   const roomRef = useRef<Room | null>(null);
   const audioElRef = useRef<HTMLAudioElement | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const cancelledRef = useRef(false);
+
+  const startCall = useCallback(async () => {
+    if (!conversationId) return;
+    cancelledRef.current = false;
+    setErrorMsg(null);
+    setErrorKind(null);
+    setElapsed(0);
+    setMuted(false);
+    setState("requesting");
+    const tokenRes = await requestVoiceToken(conversationId);
+    if (cancelledRef.current) return;
+    if (!tokenRes.ok) {
+      if (tokenRes.error.kind === "daily_cap") {
+        setErrorMsg("You've reached today's voice limit. Come back tomorrow.");
+      } else if (tokenRes.error.kind === "global_cap") {
+        setErrorMsg("Voice is temporarily unavailable. Please try again later.");
+      } else if (tokenRes.error.kind === "unauthenticated") {
+        setErrorMsg("You need to sign in again.");
+      } else {
+        setErrorMsg("Couldn't start the call. Try again.");
+      }
+      setErrorKind("generic");
+      setState("error");
+      return;
+    }
+
+    setState("connecting");
+    const room = new Room({
+      adaptiveStream: true,
+      dynacast: true,
+    });
+    roomRef.current = room;
+
+    // Play the agent's audio track when it comes in
+    room.on(
+      RoomEvent.TrackSubscribed,
+      (track: RemoteTrack, _pub: RemoteTrackPublication, _p: RemoteParticipant) => {
+        if (track.kind === Track.Kind.Audio) {
+          const el = (audioElRef.current ??= document.createElement("audio"));
+          el.autoplay = true;
+          track.attach(el);
+        }
+      },
+    );
+
+    room.on(RoomEvent.Disconnected, () => {
+      // Agent shut us down (crisis redirect / quota / etc) OR network died.
+      // Either way: end the call gracefully.
+      finishCall();
+    });
+
+    try {
+      await room.connect(tokenRes.data.livekit_url, tokenRes.data.access_token);
+      if (cancelledRef.current) {
+        await room.disconnect();
+        return;
+      }
+      await room.localParticipant.setMicrophoneEnabled(true);
+      setState("connected");
+      // start elapsed timer
+      const startedAt = Date.now();
+      timerRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+      }, 500);
+    } catch (e) {
+      const err = e as Error;
+      const msg = (err?.message ?? "").toLowerCase();
+      if (err?.name === "NotAllowedError" || msg.includes("permission")) {
+        setErrorMsg(
+          "We need access to your microphone to start a call. Tap the 🎤 icon in your browser's address bar, allow access, and try again.",
+        );
+        setErrorKind("mic_permission");
+      } else if (err?.name === "NotFoundError") {
+        setErrorMsg("No microphone detected. Connect one and try again.");
+        setErrorKind("no_mic");
+      } else {
+        setErrorMsg("Couldn't connect. Try again in a moment.");
+        setErrorKind("generic");
+      }
+      setState("error");
+      await room.disconnect().catch(() => {});
+    }
+  }, [conversationId]);
 
   // Connect when modal opens
   useEffect(() => {
     if (!open || !conversationId) return;
-    let cancelled = false;
-
-    (async () => {
-      setErrorMsg(null);
-      setElapsed(0);
-      setMuted(false);
-      setState("requesting");
-      const tokenRes = await requestVoiceToken(conversationId);
-      if (cancelled) return;
-      if (!tokenRes.ok) {
-        if (tokenRes.error.kind === "daily_cap") {
-          setErrorMsg("You've reached today's voice limit. Come back tomorrow.");
-        } else if (tokenRes.error.kind === "global_cap") {
-          setErrorMsg("Voice is temporarily unavailable. Please try again later.");
-        } else if (tokenRes.error.kind === "unauthenticated") {
-          setErrorMsg("You need to sign in again.");
-        } else {
-          setErrorMsg("Couldn't start the call. Try again.");
-        }
-        setState("error");
-        return;
-      }
-
-      setState("connecting");
-      const room = new Room({
-        adaptiveStream: true,
-        dynacast: true,
-      });
-      roomRef.current = room;
-
-      // Play the agent's audio track when it comes in
-      room.on(
-        RoomEvent.TrackSubscribed,
-        (track: RemoteTrack, _pub: RemoteTrackPublication, _p: RemoteParticipant) => {
-          if (track.kind === Track.Kind.Audio) {
-            const el = (audioElRef.current ??= document.createElement("audio"));
-            el.autoplay = true;
-            track.attach(el);
-          }
-        },
-      );
-
-      room.on(RoomEvent.Disconnected, () => {
-        // Agent shut us down (crisis redirect / quota / etc) OR network died.
-        // Either way: end the call gracefully.
-        finishCall();
-      });
-
-      try {
-        await room.connect(tokenRes.data.livekit_url, tokenRes.data.access_token);
-        if (cancelled) {
-          await room.disconnect();
-          return;
-        }
-        await room.localParticipant.setMicrophoneEnabled(true);
-        setState("connected");
-        // start elapsed timer
-        const startedAt = Date.now();
-        timerRef.current = setInterval(() => {
-          setElapsed(Math.floor((Date.now() - startedAt) / 1000));
-        }, 500);
-      } catch {
-        setErrorMsg("Couldn't connect. Check your microphone permission and try again.");
-        setState("error");
-        await room.disconnect().catch(() => {});
-      }
-    })();
+    startCall();
 
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
       finishCall();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -255,12 +275,27 @@ export function CallScreen({ open, conversationId, onClose, onCallEnded }: Props
             </button>
           )}
           {state === "error" && (
-            <button
-              onClick={dismissError}
-              className="px-4 py-2 text-sm rounded-full bg-cream text-sage hover:opacity-90"
-            >
-              Close
-            </button>
+            <>
+              {(errorKind === "mic_permission" || errorKind === "no_mic") && (
+                <button
+                  onClick={() => startCall()}
+                  className="px-4 py-2 text-sm rounded-full bg-cream text-sage hover:opacity-90"
+                >
+                  Try again
+                </button>
+              )}
+              <button
+                onClick={dismissError}
+                className={cn(
+                  "px-4 py-2 text-sm rounded-full hover:opacity-90",
+                  errorKind === "mic_permission" || errorKind === "no_mic"
+                    ? "bg-cream/15 text-cream"
+                    : "bg-cream text-sage",
+                )}
+              >
+                Close
+              </button>
+            </>
           )}
           {state === "ending" && (
             <div className="text-sm opacity-70">Call ended</div>
