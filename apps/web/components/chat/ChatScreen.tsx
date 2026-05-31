@@ -16,7 +16,7 @@ import type {
 } from "@/lib/api/types";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 export function ChatScreen({ initialId }: { initialId: string | null }) {
   const router = useRouter();
@@ -36,8 +36,13 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
 
-  // Bootstrap: load conversations + me; if no active id, create or pick latest.
+  // Bootstrap: load conversations + me; pick latest if no active id.
+  // We DO NOT auto-create a conversation here — that produced duplicates if
+  // the effect ran twice. First send creates the conversation lazily.
+  const bootstrapped = useRef(false);
   useEffect(() => {
+    if (bootstrapped.current) return;
+    bootstrapped.current = true;
     (async () => {
       const [meRes, convs] = await Promise.all([
         api.me(),
@@ -45,22 +50,18 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
       ]);
       setMe(meRes);
       setConversations(convs);
-
-      let id = activeId;
-      if (!id) {
-        if (convs.length > 0) {
-          id = convs[0].id;
-        } else {
-          const created = await api.createConversation();
-          setConversations([created]);
-          id = created.id;
-        }
+      if (!activeId && convs.length > 0) {
+        const id = convs[0].id;
         router.replace(`/chat/${id}` as Route);
         setActiveId(id);
       }
     })().catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Single-flight guard so rapid clicks on "+ New conversation" don't
+  // create two empty rows.
+  const creatingConv = useRef(false);
 
   // Load messages when active conversation changes.
   useEffect(() => {
@@ -76,7 +77,24 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   }, [activeId, conversations]);
 
   async function handleSend(text: string) {
-    if (!activeId) return;
+    // Lazy-create the first conversation on the user's first message.
+    let convId = activeId;
+    if (!convId) {
+      if (creatingConv.current) return;
+      creatingConv.current = true;
+      try {
+        const c = await api.createConversation();
+        setConversations((prev) => [c, ...prev]);
+        setActiveId(c.id);
+        router.replace(`/chat/${c.id}` as Route);
+        convId = c.id;
+      } catch {
+        creatingConv.current = false;
+        setSendError("Couldn't start a conversation. Try again.");
+        return;
+      }
+      creatingConv.current = false;
+    }
     setSending(true);
     setSendError(null);
 
@@ -114,7 +132,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     const producer = (async () => {
       try {
         for await (const ev of streamChat({
-          conversationId: activeId!,
+          conversationId: convId,
           content: text,
         })) {
           if (ev.type === "started") {
@@ -201,11 +219,17 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   }
 
   async function handleNewConversation() {
-    const c = await api.createConversation();
-    setConversations((prev) => [c, ...prev]);
-    setActiveId(c.id);
-    setDrawerOpen(false);
-    router.replace(`/chat/${c.id}` as Route);
+    if (creatingConv.current) return; // single-flight guard
+    creatingConv.current = true;
+    try {
+      const c = await api.createConversation();
+      setConversations((prev) => [c, ...prev]);
+      setActiveId(c.id);
+      setDrawerOpen(false);
+      router.replace(`/chat/${c.id}` as Route);
+    } finally {
+      creatingConv.current = false;
+    }
   }
 
   const capReached = me ? me.today_text_msg_count >= me.daily_text_msg_cap : false;

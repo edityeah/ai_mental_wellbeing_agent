@@ -17,6 +17,23 @@ function TypingBubble() {
   );
 }
 
+function EmptyState() {
+  return (
+    <div className="flex-1 flex items-center justify-center px-6 py-12 text-center">
+      <div className="max-w-md">
+        <div className="text-4xl mb-4">🍃</div>
+        <h2 className="font-serif text-xl text-sage mb-2">
+          I&apos;m here to be a steady presence.
+        </h2>
+        <p className="text-sm text-sage-light leading-relaxed">
+          There&apos;s no script. Share whatever&apos;s on your mind —
+          something heavy, something small, or just how your day went.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function MessageList({
   messages,
   streamingText,
@@ -35,6 +52,11 @@ export function MessageList({
   const showThinking = streamingText === "";
   const showStreamingBubble =
     streamingText !== null && streamingText.length > 0;
+  const showEmpty = messages.length === 0 && streamingText === null;
+
+  if (showEmpty) {
+    return <EmptyState />;
+  }
 
   return (
     <div className="flex-1 overflow-y-auto px-3 md:px-6 py-4 md:py-6 space-y-4 bg-cream">
