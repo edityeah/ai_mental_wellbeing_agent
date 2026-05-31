@@ -52,3 +52,37 @@ class SafetyResult(BaseModel):
 class ProfileUpdaterOutput(BaseModel):
     profile: dict
     summary: str
+
+
+class VoiceTokenRequest(BaseModel):
+    conversation_id: uuid.UUID
+
+
+class VoiceTokenResponse(BaseModel):
+    access_token: str
+    room_name: str
+    livekit_url: str
+    ttl_seconds: int
+    voice_seconds_remaining: int
+
+
+class VoiceHeartbeatRequest(BaseModel):
+    elapsed_seconds: int = Field(..., ge=0, le=600)
+
+
+class VoiceHeartbeatResponse(BaseModel):
+    should_end: bool
+    reason: str | None = None
+
+
+class VoiceEndRequest(BaseModel):
+    duration_seconds: int = Field(..., ge=0)
+    end_reason: Literal[
+        "user_hangup",
+        "silence_timeout",
+        "max_duration",
+        "quota_exhausted",
+        "agent_crisis_redirect",
+        "error",
+    ]
+    audio_egress_url: str | None = None
