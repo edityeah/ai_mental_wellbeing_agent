@@ -1,10 +1,12 @@
 "use client";
 
 import { Composer } from "@/components/chat/Composer";
+import { ConfirmDeleteDialog } from "@/components/chat/ConfirmDeleteDialog";
 import { Header } from "@/components/chat/Header";
 import { MessageList } from "@/components/chat/MessageList";
 import { OfflineBanner } from "@/components/chat/OfflineBanner";
 import { QuotaFooter } from "@/components/chat/QuotaFooter";
+import { RenameDialog } from "@/components/chat/RenameDialog";
 import { ThreadList } from "@/components/threads/ThreadList";
 import { ThreadsDrawer } from "@/components/threads/ThreadsDrawer";
 import { api } from "@/lib/api/client";
@@ -35,6 +37,16 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
+
+  // In-app dialogs (replaces window.prompt / window.confirm)
+  const [renameTarget, setRenameTarget] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<{
+    id: string;
+    title: string;
+  } | null>(null);
 
   // Bootstrap: load conversations + me; pick latest if no active id.
   // We DO NOT auto-create a conversation here — that produced duplicates if
@@ -232,24 +244,35 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     }
   }
 
-  async function handleRenameConversation(id: string, currentTitle: string) {
-    const newTitle = window.prompt("Rename conversation", currentTitle);
-    if (!newTitle || newTitle.trim() === currentTitle) return;
-    const trimmed = newTitle.trim().slice(0, 200);
+  function requestRenameConversation(id: string, currentTitle: string) {
+    setRenameTarget({ id, title: currentTitle });
+  }
+
+  async function commitRename(newTitle: string) {
+    if (!renameTarget) return;
+    const id = renameTarget.id;
     try {
-      const updated = await api.renameConversation(id, trimmed);
+      const updated = await api.renameConversation(id, newTitle);
       setConversations((prev) =>
         prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c)),
       );
-      if (id === activeId) setActiveConv((c) => (c ? { ...c, title: updated.title } : c));
+      if (id === activeId) {
+        setActiveConv((c) => (c ? { ...c, title: updated.title } : c));
+      }
+      setRenameTarget(null);
     } catch {
-      window.alert("Couldn't rename. Try again.");
+      setSendError("Couldn't rename. Try again.");
+      setRenameTarget(null);
     }
   }
 
-  async function handleDeleteConversation(id: string, title: string) {
-    const ok = window.confirm(`Delete "${title}"? This can't be undone.`);
-    if (!ok) return;
+  function requestDeleteConversation(id: string, title: string) {
+    setDeleteTarget({ id, title });
+  }
+
+  async function commitDelete() {
+    if (!deleteTarget) return;
+    const id = deleteTarget.id;
     try {
       await api.deleteConversation(id);
       const remaining = conversations.filter((c) => c.id !== id);
@@ -266,8 +289,10 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           router.replace("/chat");
         }
       }
+      setDeleteTarget(null);
     } catch {
-      window.alert("Couldn't delete. Try again.");
+      setSendError("Couldn't delete. Try again.");
+      setDeleteTarget(null);
     }
   }
 
@@ -285,8 +310,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
             router.replace(`/chat/${id}` as Route);
           }}
           onNew={handleNewConversation}
-          onRename={handleRenameConversation}
-          onDelete={handleDeleteConversation}
+          onRename={requestRenameConversation}
+          onDelete={requestDeleteConversation}
         />
       </ThreadsDrawer>
 
@@ -318,6 +343,20 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           onSend={handleSend}
         />
       </main>
+
+      <RenameDialog
+        open={renameTarget !== null}
+        initialTitle={renameTarget?.title ?? ""}
+        onCancel={() => setRenameTarget(null)}
+        onSubmit={commitRename}
+      />
+
+      <ConfirmDeleteDialog
+        open={deleteTarget !== null}
+        title={deleteTarget?.title ?? ""}
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={commitDelete}
+      />
     </>
   );
 }
