@@ -141,7 +141,6 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         state.streamDone = true;
         setSendError("No connection. Your message wasn't sent.");
       } finally {
-        // Whatever happened, signal the consumer to stop waiting for more.
         state.streamDone = true;
       }
     })();
@@ -150,7 +149,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     // One character per tick, always. ~33ms ≈ 30 chars/sec — feels like
     // someone is actually typing. The buffer can race ahead of us; that's
     // fine, we just keep stepping at the human pace.
-    const tickMs = 60;
+    // ~40 chars/sec — feels like a real person typing.
+    const tickMs = 25;
     const sleep = (ms: number) =>
       new Promise<void>((r) => setTimeout(r, ms));
 

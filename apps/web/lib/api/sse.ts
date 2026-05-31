@@ -40,18 +40,28 @@ export async function* streamChat(args: {
   const decoder = new TextDecoder();
   let buffer = "";
 
+  /** Find the next event boundary — handles \n\n (LF) and \r\n\r\n (CRLF). */
+  function findBoundary(s: string): { sep: number; sepLen: number } {
+    const crlf = s.indexOf("\r\n\r\n");
+    const lf = s.indexOf("\n\n");
+    if (crlf >= 0 && (lf < 0 || crlf < lf)) return { sep: crlf, sepLen: 4 };
+    if (lf >= 0) return { sep: lf, sepLen: 2 };
+    return { sep: -1, sepLen: 0 };
+  }
+
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
     while (true) {
-      const sep = buffer.indexOf("\n\n");
+      const { sep, sepLen } = findBoundary(buffer);
       if (sep < 0) break;
       const rawEvent = buffer.slice(0, sep);
-      buffer = buffer.slice(sep + 2);
+      buffer = buffer.slice(sep + sepLen);
 
-      const lines = rawEvent.split("\n");
+      // Strip trailing \r from each line (CRLF format).
+      const lines = rawEvent.split(/\r?\n/);
       let eventName = "message";
       const dataLines: string[] = [];
       for (const line of lines) {
