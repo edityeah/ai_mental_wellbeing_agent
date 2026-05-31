@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     daily_text_msg_cap: int = 50
     daily_cost_ceiling_usd: float = 20.0
 
+    # LiveKit / voice
+    livekit_api_key: str = ""
+    livekit_api_secret: str = ""
+    livekit_url: str = ""
+    voice_worker_secret: str = ""
+    daily_voice_seconds_cap: int = 600
+    per_call_max_seconds: int = 300
+    daily_voice_minutes_global: int = 500
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
