@@ -135,6 +135,47 @@ class UserProfile(Base):
     )
 
 
+class VoiceSession(Base):
+    __tablename__ = "voice_sessions"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    conversation_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    room_name: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    duration_seconds: Mapped[int | None] = mapped_column(Integer)
+    end_reason: Mapped[str | None] = mapped_column(Text)
+    audio_egress_url: Mapped[str | None] = mapped_column(Text)
+
+    __table_args__ = (
+        CheckConstraint(
+            "end_reason IS NULL OR end_reason IN ("
+            "'user_hangup','silence_timeout','max_duration',"
+            "'quota_exhausted','agent_crisis_redirect','error'"
+            ")",
+            name="ck_voice_sessions_end_reason",
+        ),
+        Index(
+            "ix_voice_sessions_user_started",
+            "user_id",
+            "started_at",
+        ),
+    )
+
+
 class UsageDaily(Base):
     __tablename__ = "usage_daily"
 
