@@ -147,22 +147,16 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     })();
 
     // --- Consumer: reveal at a fixed cadence so it feels like typing ---
-    // Crisis cards arrive as a single big chunk; reveal them faster so the
-    // user can read the helplines quickly. Normal replies feel best at ~25ms.
-    const tickMs = 18;
+    // One character per tick, always. ~33ms ≈ 30 chars/sec — feels like
+    // someone is actually typing. The buffer can race ahead of us; that's
+    // fine, we just keep stepping at the human pace.
+    const tickMs = 60;
     const sleep = (ms: number) =>
       new Promise<void>((r) => setTimeout(r, ms));
 
     while (!state.streamDone || state.displayed.length < state.buffer.length) {
       if (state.displayed.length < state.buffer.length) {
-        // If the buffer is racing ahead (long reply, fast network), reveal a
-        // few chars per tick to catch up. Otherwise, one char per tick.
-        const gap = state.buffer.length - state.displayed.length;
-        const advance = gap > 80 ? Math.ceil(gap / 60) : 1;
-        state.displayed = state.buffer.slice(
-          0,
-          state.displayed.length + advance,
-        );
+        state.displayed = state.buffer.slice(0, state.displayed.length + 1);
         setStreamingText(state.displayed);
       }
       await sleep(tickMs);
