@@ -36,9 +36,20 @@ const config: Config = {
           "0%, 60%, 100%": { opacity: "0.3", transform: "translateY(0)" },
           "30%": { opacity: "1", transform: "translateY(-3px)" },
         },
+        "pulse-orb": {
+          "0%, 100%": {
+            transform: "scale(1)",
+            boxShadow: "0 0 0 0 rgba(250, 247, 242, 0.18)",
+          },
+          "50%": {
+            transform: "scale(1.05)",
+            boxShadow: "0 0 0 22px rgba(250, 247, 242, 0)",
+          },
+        },
       },
       animation: {
         "typing-dot": "typing-dot 1.2s ease-in-out infinite",
+        "pulse-orb": "pulse-orb 2.4s ease-in-out infinite",
       },
     },
   },
