@@ -3,10 +3,18 @@ from __future__ import annotations
 import uuid
 from datetime import date
 
-from sqlalchemy import select, update
+from datetime import datetime, timezone
+
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Conversation, Message, UsageDaily, UserProfile
+from app.db.models import (
+    Conversation,
+    Message,
+    UsageDaily,
+    UserProfile,
+    VoiceSession,
+)
 
 
 async def create_conversation(
@@ -160,3 +168,79 @@ async def increment_text_msg_count(
     row.text_msg_count += 1
     await session.flush()
     return row.text_msg_count
+
+
+async def create_voice_session(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+    room_name: str,
+) -> VoiceSession:
+    row = VoiceSession(
+        user_id=user_id,
+        conversation_id=conversation_id,
+        room_name=room_name,
+    )
+    session.add(row)
+    await session.flush()
+    return row
+
+
+async def get_voice_session_by_room(
+    session: AsyncSession, *, room_name: str
+) -> VoiceSession | None:
+    stmt = select(VoiceSession).where(VoiceSession.room_name == room_name)
+    return (await session.execute(stmt)).scalar_one_or_none()
+
+
+async def end_voice_session(
+    session: AsyncSession,
+    *,
+    room_name: str,
+    duration_seconds: int,
+    end_reason: str,
+    audio_egress_url: str | None,
+) -> VoiceSession | None:
+    row = await get_voice_session_by_room(session, room_name=room_name)
+    if row is None:
+        return None
+    row.ended_at = datetime.now(tz=timezone.utc)
+    row.duration_seconds = duration_seconds
+    row.end_reason = end_reason
+    row.audio_egress_url = audio_egress_url
+    await session.flush()
+    return row
+
+
+async def get_voice_seconds_today(
+    session: AsyncSession, *, user_id: uuid.UUID, today: date
+) -> int:
+    stmt = select(UsageDaily.voice_seconds).where(
+        UsageDaily.user_id == user_id, UsageDaily.date == today
+    )
+    val = (await session.execute(stmt)).scalar_one_or_none()
+    return int(val or 0)
+
+
+async def increment_voice_seconds(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    today: date,
+    delta_seconds: int,
+) -> int:
+    row = await get_or_create_usage_today(session, user_id=user_id, today=today)
+    row.voice_seconds += int(delta_seconds)
+    await session.flush()
+    return row.voice_seconds
+
+
+async def total_voice_seconds_today_global(
+    session: AsyncSession, *, today: date
+) -> int:
+    stmt = select(func.coalesce(func.sum(UsageDaily.voice_seconds), 0)).where(
+        UsageDaily.date == today
+    )
+    val = (await session.execute(stmt)).scalar_one()
+    return int(val or 0)
