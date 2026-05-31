@@ -16,5 +16,19 @@ services:
       timeout: 5s
       retries: 10
 
+  voice-worker:
+    build:
+      context: .
+      dockerfile: apps/voice-worker/Dockerfile
+    container_name: mwc-voice-worker
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+    env_file:
+      - ./apps/api/.env
+    profiles: ["voice"]   # opt-in — `docker compose --profile voice up` to start
+
 volumes:
   mwc-pgdata:

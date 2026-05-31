@@ -10,6 +10,7 @@
   "scripts": {
     "dev:web": "pnpm --filter @mwc/web dev",
     "dev:api": "cd apps/api && uv run uvicorn app.main:app --reload --port 8000",
+    "dev:voice": "cd apps/voice-worker && uv run python -m worker.main dev",
     "lint": "pnpm -r lint",
     "typecheck": "pnpm -r typecheck"
   }

@@ -21,6 +21,8 @@ API_PID=$!
 ( cd apps/web && pnpm dev ) &
 WEB_PID=$!
 
+echo "→ to enable voice locally, run in a separate terminal: pnpm run dev:voice"
+
 trap "echo '→ stopping'; kill $API_PID $WEB_PID 2>/dev/null || true" EXIT
 
 wait
