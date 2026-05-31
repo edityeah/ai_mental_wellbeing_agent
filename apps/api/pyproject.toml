@@ -31,6 +31,10 @@ dev = [
   "cryptography>=43.0",
 ]
 
+[tool.setuptools.packages.find]
+include = ["app*"]
+exclude = ["alembic*", "tests*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"
