@@ -97,78 +97,112 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     // Empty string → "Companion is thinking…" bubble
     setStreamingText("");
 
-    let assistantMsgId: string | null = null;
-    let isCrisis = false;
-    let collected = "";
+    // Buffer (what server has sent) + displayed (what user has seen) decouples
+    // network arrival from visual reveal. The renderer reveals one char per
+    // tick from buffer→displayed at a fixed cadence — gives a typewriter feel
+    // regardless of how Anthropic chunks its stream.
+    const state = {
+      buffer: "",
+      displayed: "",
+      streamDone: false,
+      assistantMsgId: null as string | null,
+      isCrisis: false,
+      errored: false,
+    };
 
-    try {
-      for await (const ev of streamChat({
-        conversationId: activeId,
-        content: text,
-      })) {
-        if (ev.type === "started") {
-          assistantMsgId = ev.message_id;
-          isCrisis = ev.kind === "crisis_card";
-        } else if (ev.type === "token") {
-          collected += ev.text;
-          setStreamingText(collected);
-        } else if (ev.type === "done") {
-          // Commit the message and clear streaming state.
-          if (assistantMsgId && collected.length > 0) {
-            setMessages((prev) => [
-              ...prev,
-              {
-                id: assistantMsgId!,
-                role: isCrisis ? "system_crisis" : "assistant",
-                source: "text",
-                content: collected,
-                risk_level: null,
-                created_at: new Date().toISOString(),
-              },
-            ]);
+    // --- Producer: consume SSE, push deltas into state.buffer ---
+    const producer = (async () => {
+      try {
+        for await (const ev of streamChat({
+          conversationId: activeId!,
+          content: text,
+        })) {
+          if (ev.type === "started") {
+            state.assistantMsgId = ev.message_id;
+            state.isCrisis = ev.kind === "crisis_card";
+          } else if (ev.type === "token") {
+            state.buffer += ev.text;
+          } else if (ev.type === "done") {
+            state.streamDone = true;
+            return;
+          } else if (ev.type === "error") {
+            state.errored = true;
+            state.streamDone = true;
+            if (ev.error === "daily_cap_reached") {
+              setSendError("You've reached today's limit — see you tomorrow.");
+            } else {
+              setSendError("Something's off. Try again in a moment.");
+            }
+            return;
           }
-          setStreamingText(null);
-        } else if (ev.type === "error") {
-          setStreamingText(null);
-          if (ev.error === "daily_cap_reached") {
-            setSendError("You've reached today's limit — see you tomorrow.");
-          } else {
-            setSendError("Something's off. Try again in a moment.");
-          }
-          return;
         }
+      } catch {
+        state.errored = true;
+        state.streamDone = true;
+        setSendError("No connection. Your message wasn't sent.");
+      } finally {
+        // Whatever happened, signal the consumer to stop waiting for more.
+        state.streamDone = true;
       }
+    })();
 
-      // Safety: if the loop ended without an explicit "done", still commit
-      // whatever we collected and clear the streaming bubble.
-      if (collected.length > 0 && assistantMsgId) {
-        setMessages((prev) => {
-          // Avoid double-add if "done" already committed it.
-          if (prev.some((m) => m.id === assistantMsgId)) return prev;
-          return [
-            ...prev,
-            {
-              id: assistantMsgId!,
-              role: isCrisis ? "system_crisis" : "assistant",
-              source: "text",
-              content: collected,
-              risk_level: null,
-              created_at: new Date().toISOString(),
-            },
-          ];
-        });
+    // --- Consumer: reveal at a fixed cadence so it feels like typing ---
+    // Crisis cards arrive as a single big chunk; reveal them faster so the
+    // user can read the helplines quickly. Normal replies feel best at ~25ms.
+    const tickMs = 18;
+    const sleep = (ms: number) =>
+      new Promise<void>((r) => setTimeout(r, ms));
+
+    while (!state.streamDone || state.displayed.length < state.buffer.length) {
+      if (state.displayed.length < state.buffer.length) {
+        // If the buffer is racing ahead (long reply, fast network), reveal a
+        // few chars per tick to catch up. Otherwise, one char per tick.
+        const gap = state.buffer.length - state.displayed.length;
+        const advance = gap > 80 ? Math.ceil(gap / 60) : 1;
+        state.displayed = state.buffer.slice(
+          0,
+          state.displayed.length + advance,
+        );
+        setStreamingText(state.displayed);
       }
-      setStreamingText(null);
+      await sleep(tickMs);
+      if (state.errored) break;
+    }
 
-      // Refresh /me + conversations (for the auto-generated title)
-      setMe(await api.me());
-      const convs = await api.listConversations();
-      setConversations(convs);
-    } catch (e) {
-      setStreamingText(null);
-      setSendError("No connection. Your message wasn't sent.");
-    } finally {
-      setSending(false);
+    await producer; // ensure the SSE consumer fully resolved
+
+    // Commit the assistant message (unless we errored mid-stream).
+    if (!state.errored && state.displayed.length > 0 && state.assistantMsgId) {
+      const finalText = state.displayed;
+      const msgId = state.assistantMsgId;
+      const crisis = state.isCrisis;
+      setMessages((prev) => {
+        if (prev.some((m) => m.id === msgId)) return prev;
+        return [
+          ...prev,
+          {
+            id: msgId,
+            role: crisis ? "system_crisis" : "assistant",
+            source: "text",
+            content: finalText,
+            risk_level: null,
+            created_at: new Date().toISOString(),
+          },
+        ];
+      });
+    }
+    setStreamingText(null);
+    setSending(false);
+
+    // Refresh /me + conversations (for the auto-generated title)
+    if (!state.errored) {
+      try {
+        setMe(await api.me());
+        const convs = await api.listConversations();
+        setConversations(convs);
+      } catch {
+        /* non-critical refresh */
+      }
     }
   }
 
