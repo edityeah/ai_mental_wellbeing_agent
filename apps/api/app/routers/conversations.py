@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import AuthClaims
@@ -77,6 +77,29 @@ async def rename_conversation(
         created_at=conv.created_at,
         last_msg_at=conv.last_msg_at,
     )
+
+
+@router.delete(
+    "/conversations/{conversation_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def delete_conversation(
+    conversation_id: uuid.UUID,
+    claims: AuthClaims = CurrentUser,
+    session: AsyncSession = DBSession,
+) -> Response:
+    """Hard-delete a conversation and its messages (FK cascade does the messages).
+
+    Returns 204 on success; 404 if the conversation is not owned by the user.
+    """
+    conv = await repos.get_conversation(
+        session, conversation_id=conversation_id, user_id=claims.user_id
+    )
+    if conv is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+    await session.delete(conv)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.get(

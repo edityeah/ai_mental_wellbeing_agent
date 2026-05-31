@@ -20,9 +20,15 @@ class _FakeStream:
     async def __aexit__(self, *_):
         return None
 
-    async def text_stream(self) -> AsyncIterator[str]:
-        for c in self._chunks:
-            yield c
+    @property
+    def text_stream(self) -> AsyncIterator[str]:
+        # Mirrors the new Anthropic SDK: text_stream is an async-iterator
+        # PROPERTY, not a method.
+        async def _gen() -> AsyncIterator[str]:
+            for c in self._chunks:
+                yield c
+
+        return _gen()
 
     @property
     def usage(self):

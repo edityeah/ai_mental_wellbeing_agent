@@ -232,6 +232,45 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     }
   }
 
+  async function handleRenameConversation(id: string, currentTitle: string) {
+    const newTitle = window.prompt("Rename conversation", currentTitle);
+    if (!newTitle || newTitle.trim() === currentTitle) return;
+    const trimmed = newTitle.trim().slice(0, 200);
+    try {
+      const updated = await api.renameConversation(id, trimmed);
+      setConversations((prev) =>
+        prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c)),
+      );
+      if (id === activeId) setActiveConv((c) => (c ? { ...c, title: updated.title } : c));
+    } catch {
+      window.alert("Couldn't rename. Try again.");
+    }
+  }
+
+  async function handleDeleteConversation(id: string, title: string) {
+    const ok = window.confirm(`Delete "${title}"? This can't be undone.`);
+    if (!ok) return;
+    try {
+      await api.deleteConversation(id);
+      const remaining = conversations.filter((c) => c.id !== id);
+      setConversations(remaining);
+      if (id === activeId) {
+        if (remaining.length > 0) {
+          const next = remaining[0].id;
+          setActiveId(next);
+          router.replace(`/chat/${next}` as Route);
+        } else {
+          setActiveId(null);
+          setActiveConv(null);
+          setMessages([]);
+          router.replace("/chat");
+        }
+      }
+    } catch {
+      window.alert("Couldn't delete. Try again.");
+    }
+  }
+
   const capReached = me ? me.today_text_msg_count >= me.daily_text_msg_cap : false;
 
   return (
@@ -246,6 +285,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
             router.replace(`/chat/${id}` as Route);
           }}
           onNew={handleNewConversation}
+          onRename={handleRenameConversation}
+          onDelete={handleDeleteConversation}
         />
       </ThreadsDrawer>
 

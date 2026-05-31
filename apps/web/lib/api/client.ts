@@ -44,6 +44,19 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify({ title }),
     }),
+  deleteConversation: async (id: string): Promise<void> => {
+    const headers = {
+      "Content-Type": "application/json",
+      ...(await authHeader()),
+    };
+    const r = await fetch(`${BASE}/api/v1/conversations/${id}`, {
+      method: "DELETE",
+      headers,
+    });
+    if (!r.ok && r.status !== 204) {
+      throw new Error(`${r.status}: ${await r.text()}`);
+    }
+  },
   listMessages: (id: string) =>
     jsonRequest<MessageOut[]>(`/conversations/${id}/messages`),
 };

@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import type { ConversationOut } from "@/lib/api/types";
 import { cn } from "@/lib/cn";
 
@@ -20,16 +21,103 @@ function groupByRecency(items: ConversationOut[]) {
   return out;
 }
 
+function ThreadRow({
+  conv,
+  active,
+  onPick,
+  onRename,
+  onDelete,
+}: {
+  conv: ConversationOut;
+  active: boolean;
+  onPick: () => void;
+  onRename: () => void;
+  onDelete: () => void;
+}) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close menu on outside click
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onDoc(e: MouseEvent) {
+      if (!menuRef.current?.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [menuOpen]);
+
+  return (
+    <div className="relative group" ref={menuRef}>
+      <button
+        onClick={onPick}
+        className={cn(
+          "block w-full text-left text-sm px-3 py-2 pr-9 rounded-lg truncate",
+          active
+            ? "bg-cream-edge text-ink font-medium"
+            : "text-sage-light hover:bg-cream-warm",
+        )}
+      >
+        {conv.title}
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          setMenuOpen((v) => !v);
+        }}
+        aria-label="Conversation actions"
+        className={cn(
+          "absolute right-1.5 top-1/2 -translate-y-1/2 w-7 h-7 rounded flex items-center justify-center text-sage-light hover:bg-cream-edge",
+          // Always visible on the active row + on hover via group
+          active
+            ? "opacity-100"
+            : "opacity-0 group-hover:opacity-100 focus:opacity-100",
+        )}
+      >
+        ⋯
+      </button>
+      {menuOpen && (
+        <div className="absolute right-1 top-full mt-1 z-20 bg-white border border-cream-edge rounded-lg shadow-lg py-1 w-32 text-sm">
+          <button
+            onClick={() => {
+              setMenuOpen(false);
+              onRename();
+            }}
+            className="block w-full text-left px-3 py-1.5 text-ink hover:bg-cream-warm"
+          >
+            Rename
+          </button>
+          <button
+            onClick={() => {
+              setMenuOpen(false);
+              onDelete();
+            }}
+            className="block w-full text-left px-3 py-1.5 text-crisis hover:bg-cream-warm"
+          >
+            Delete
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function ThreadList({
   items,
   activeId,
   onPick,
   onNew,
+  onRename,
+  onDelete,
 }: {
   items: ConversationOut[];
   activeId: string | null;
   onPick: (id: string) => void;
   onNew: () => void;
+  onRename: (id: string, currentTitle: string) => void;
+  onDelete: (id: string, title: string) => void;
 }) {
   const groups = groupByRecency(items);
   return (
@@ -51,18 +139,14 @@ export function ThreadList({
                 {label}
               </div>
               {list.map((c) => (
-                <button
+                <ThreadRow
                   key={c.id}
-                  onClick={() => onPick(c.id)}
-                  className={cn(
-                    "block w-full text-left text-sm px-3 py-2 rounded-lg truncate",
-                    c.id === activeId
-                      ? "bg-cream-edge text-ink font-medium"
-                      : "text-sage-light hover:bg-cream-warm",
-                  )}
-                >
-                  {c.title}
-                </button>
+                  conv={c}
+                  active={c.id === activeId}
+                  onPick={() => onPick(c.id)}
+                  onRename={() => onRename(c.id, c.title)}
+                  onDelete={() => onDelete(c.id, c.title)}
+                />
               ))}
             </div>
           ),
