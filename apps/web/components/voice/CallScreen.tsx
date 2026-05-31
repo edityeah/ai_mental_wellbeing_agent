@@ -1,0 +1,272 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import {
+  Room,
+  RoomEvent,
+  RemoteParticipant,
+  RemoteTrack,
+  RemoteTrackPublication,
+  Track,
+} from "livekit-client";
+import { requestVoiceToken } from "@/lib/api/voice";
+import { cn } from "@/lib/cn";
+
+type CallState = "idle" | "requesting" | "connecting" | "connected" | "ending" | "error";
+
+interface Props {
+  open: boolean;
+  conversationId: string | null;
+  onClose: () => void;
+  /** Called when the call ends successfully (so parent can refetch messages). */
+  onCallEnded: () => void;
+}
+
+export function CallScreen({ open, conversationId, onClose, onCallEnded }: Props) {
+  const [state, setState] = useState<CallState>("idle");
+  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [elapsed, setElapsed] = useState(0);
+  const [muted, setMuted] = useState(false);
+  const roomRef = useRef<Room | null>(null);
+  const audioElRef = useRef<HTMLAudioElement | null>(null);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Connect when modal opens
+  useEffect(() => {
+    if (!open || !conversationId) return;
+    let cancelled = false;
+
+    (async () => {
+      setErrorMsg(null);
+      setElapsed(0);
+      setMuted(false);
+      setState("requesting");
+      const tokenRes = await requestVoiceToken(conversationId);
+      if (cancelled) return;
+      if (!tokenRes.ok) {
+        if (tokenRes.error.kind === "daily_cap") {
+          setErrorMsg("You've reached today's voice limit. Come back tomorrow.");
+        } else if (tokenRes.error.kind === "global_cap") {
+          setErrorMsg("Voice is temporarily unavailable. Please try again later.");
+        } else if (tokenRes.error.kind === "unauthenticated") {
+          setErrorMsg("You need to sign in again.");
+        } else {
+          setErrorMsg("Couldn't start the call. Try again.");
+        }
+        setState("error");
+        return;
+      }
+
+      setState("connecting");
+      const room = new Room({
+        adaptiveStream: true,
+        dynacast: true,
+      });
+      roomRef.current = room;
+
+      // Play the agent's audio track when it comes in
+      room.on(
+        RoomEvent.TrackSubscribed,
+        (track: RemoteTrack, _pub: RemoteTrackPublication, _p: RemoteParticipant) => {
+          if (track.kind === Track.Kind.Audio) {
+            const el = (audioElRef.current ??= document.createElement("audio"));
+            el.autoplay = true;
+            track.attach(el);
+          }
+        },
+      );
+
+      room.on(RoomEvent.Disconnected, () => {
+        // Agent shut us down (crisis redirect / quota / etc) OR network died.
+        // Either way: end the call gracefully.
+        finishCall();
+      });
+
+      try {
+        await room.connect(tokenRes.data.livekit_url, tokenRes.data.access_token);
+        if (cancelled) {
+          await room.disconnect();
+          return;
+        }
+        await room.localParticipant.setMicrophoneEnabled(true);
+        setState("connected");
+        // start elapsed timer
+        const startedAt = Date.now();
+        timerRef.current = setInterval(() => {
+          setElapsed(Math.floor((Date.now() - startedAt) / 1000));
+        }, 500);
+      } catch {
+        setErrorMsg("Couldn't connect. Check your microphone permission and try again.");
+        setState("error");
+        await room.disconnect().catch(() => {});
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      finishCall();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, conversationId]);
+
+  function finishCall() {
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+    const room = roomRef.current;
+    roomRef.current = null;
+    if (room) {
+      room.disconnect().catch(() => {});
+    }
+    if (audioElRef.current) {
+      audioElRef.current.srcObject = null;
+    }
+  }
+
+  async function handleHangup() {
+    setState("ending");
+    finishCall();
+    // Give the parent a moment to refetch
+    setTimeout(() => {
+      onCallEnded();
+      onClose();
+    }, 400);
+  }
+
+  async function toggleMute() {
+    const room = roomRef.current;
+    if (!room) return;
+    const next = !muted;
+    setMuted(next);
+    await room.localParticipant.setMicrophoneEnabled(!next);
+  }
+
+  function dismissError() {
+    onClose();
+  }
+
+  // ESC closes when not in active call
+  useEffect(() => {
+    if (!open) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        if (state === "connected") {
+          handleHangup();
+        } else if (state === "error" || state === "requesting") {
+          onClose();
+        }
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, state]);
+
+  if (!open) return null;
+
+  const mmss = (s: number) => {
+    const m = Math.floor(s / 60).toString().padStart(2, "0");
+    const ss = (s % 60).toString().padStart(2, "0");
+    return `${m}:${ss}`;
+  };
+
+  return (
+    <div className="fixed inset-0 z-50">
+      {/* Dark sage gradient backdrop */}
+      <div className="absolute inset-0 bg-gradient-to-b from-sage to-sage-dark" />
+
+      <div className="relative h-full flex flex-col items-center justify-between text-cream px-6 py-10">
+        {/* Top: status + timer */}
+        <div className="text-center pt-10 md:pt-16">
+          <div className="text-[11px] tracking-[0.15em] uppercase opacity-70 mb-1">
+            {state === "requesting" && "Connecting"}
+            {state === "connecting" && "Connecting"}
+            {state === "connected" && "Connected"}
+            {state === "ending" && "Ending"}
+            {state === "error" && "Connection error"}
+            {state === "idle" && ""}
+          </div>
+          <div className="font-serif text-2xl">Companion</div>
+          {state === "connected" && (
+            <div className="text-sm opacity-75 mt-1">{mmss(elapsed)}</div>
+          )}
+        </div>
+
+        {/* Middle: orb */}
+        <div className="flex flex-col items-center">
+          <div
+            className={cn(
+              "w-36 h-36 rounded-full flex items-center justify-center text-5xl mb-6",
+              state === "connected" && "animate-pulse-orb bg-cream/15",
+              state !== "connected" && "bg-cream/10",
+            )}
+          >
+            🍃
+          </div>
+          {state === "error" && errorMsg && (
+            <p className="text-sm opacity-90 max-w-xs text-center mb-2">
+              {errorMsg}
+            </p>
+          )}
+          {state === "connected" && (
+            <p className="text-sm opacity-80 max-w-xs text-center">
+              Take a breath whenever you need. I&apos;m here.
+            </p>
+          )}
+        </div>
+
+        {/* Bottom: controls */}
+        <div className="flex items-center gap-6 pb-8 md:pb-12">
+          {state === "connected" && (
+            <>
+              <button
+                onClick={toggleMute}
+                aria-label={muted ? "Unmute" : "Mute"}
+                className={cn(
+                  "w-14 h-14 rounded-full flex items-center justify-center text-2xl transition",
+                  muted ? "bg-cream text-sage" : "bg-cream/15 hover:bg-cream/25",
+                )}
+              >
+                {muted ? "🔇" : "🎤"}
+              </button>
+              <button
+                onClick={handleHangup}
+                aria-label="End call"
+                className="w-16 h-16 rounded-full bg-crisis hover:opacity-90 flex items-center justify-center text-2xl"
+              >
+                📵
+              </button>
+              <button
+                disabled
+                aria-label="Speaker (always on for now)"
+                className="w-14 h-14 rounded-full bg-cream/15 flex items-center justify-center text-2xl opacity-60"
+              >
+                🔊
+              </button>
+            </>
+          )}
+          {(state === "requesting" || state === "connecting") && (
+            <button
+              onClick={onClose}
+              className="px-4 py-2 text-sm rounded-full bg-cream/15 hover:bg-cream/25"
+            >
+              Cancel
+            </button>
+          )}
+          {state === "error" && (
+            <button
+              onClick={dismissError}
+              className="px-4 py-2 text-sm rounded-full bg-cream text-sage hover:opacity-90"
+            >
+              Close
+            </button>
+          )}
+          {state === "ending" && (
+            <div className="text-sm opacity-70">Call ended</div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
