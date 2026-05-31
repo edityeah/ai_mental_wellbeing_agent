@@ -28,7 +28,7 @@ export function Header({
       <button
         onClick={onCallClick}
         disabled={callDisabled}
-        title={callDisabled ? "Voice limit reached for today." : "Start voice call"}
+        title={callDisabled ? "Voice limit reached — comes back tomorrow." : "Start voice call"}
         className={cn(
           "w-9 h-9 rounded-full flex items-center justify-center transition",
           callDisabled

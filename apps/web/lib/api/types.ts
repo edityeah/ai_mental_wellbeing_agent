@@ -24,6 +24,8 @@ export interface MeOut {
   display_name: string | null;
   today_text_msg_count: number;
   daily_text_msg_cap: number;
+  voice_seconds_used_today: number;
+  voice_seconds_cap: number;
 }
 
 export type SseEvent =

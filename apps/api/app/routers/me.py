@@ -40,4 +40,6 @@ async def me(
         display_name=user.display_name,
         today_text_msg_count=usage.text_msg_count,
         daily_text_msg_cap=settings.daily_text_msg_cap,
+        voice_seconds_used_today=usage.voice_seconds,
+        voice_seconds_cap=settings.daily_voice_seconds_cap,
     )

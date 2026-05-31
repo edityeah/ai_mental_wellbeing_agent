@@ -299,6 +299,9 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   }
 
   const capReached = me ? me.today_text_msg_count >= me.daily_text_msg_cap : false;
+  const voiceCapReached = me
+    ? me.voice_seconds_used_today >= me.voice_seconds_cap
+    : false;
 
   return (
     <>
@@ -322,9 +325,9 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           title={activeConv?.title || "Wellbeing"}
           onOpenDrawer={() => setDrawerOpen(true)}
           onCallClick={() => {
-            if (activeId) setCallOpen(true);
+            if (activeId && !voiceCapReached) setCallOpen(true);
           }}
-          callDisabled={!activeId}
+          callDisabled={!activeId || voiceCapReached}
         />
         <OfflineBanner />
         <MessageList

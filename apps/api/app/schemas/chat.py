@@ -42,6 +42,8 @@ class MeOut(BaseModel):
     display_name: str | None
     today_text_msg_count: int
     daily_text_msg_cap: int
+    voice_seconds_used_today: int
+    voice_seconds_cap: int
 
 
 class SafetyResult(BaseModel):

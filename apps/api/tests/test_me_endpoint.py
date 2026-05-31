@@ -57,3 +57,5 @@ async def test_me_returns_user_info_with_valid_token(db_session, test_user):
     assert body["email"] == test_user.email
     assert body["daily_text_msg_cap"] == 50
     assert body["today_text_msg_count"] == 0
+    assert body["voice_seconds_used_today"] == 0
+    assert body["voice_seconds_cap"] == 600
