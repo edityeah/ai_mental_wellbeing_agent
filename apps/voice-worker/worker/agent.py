@@ -261,6 +261,17 @@ async def entrypoint(ctx: JobContext) -> None:
             agent=agent,
             room_input_options=RoomInputOptions(),
         )
+        # Greet the user so they know the agent is live. Short on purpose —
+        # voice prompt addendum says 1-2 sentences, no filler.
+        try:
+            greeting_handle = await session.say(
+                "Hey. I'm here whenever you're ready. What's going on?",
+                allow_interruptions=True,
+            )
+            # Don't await playout — user can barge-in immediately.
+            _ = greeting_handle
+        except Exception as e:
+            logger.warning("greeting_failed: %s", e)
         # session.start() returns once the session is up; wait for it to close.
         await session.wait_for_inactive()
     except Exception as e:
