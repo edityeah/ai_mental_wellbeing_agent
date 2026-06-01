@@ -1,12 +1,17 @@
-"""The Companion's voice incarnation. Shares brain with text chat via imports
-from apps.api."""
+"""The Companion's voice incarnation.
+
+Architecture: livekit-agents pipeline = STT → LLM → TTS. We use Deepgram for
+STT, Cartesia for TTS, and a custom `CompanionLLM` (companion_llm.py) that
+wraps `app.agents.companion.stream_reply` + `app.agents.safety.classify`.
+The custom LLM is required because livekit-agents skips response generation
+entirely when `llm=None`."""
 from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import time
 import uuid
-from contextlib import asynccontextmanager
 
 from livekit import rtc
 from livekit.agents import (
@@ -15,16 +20,10 @@ from livekit.agents import (
     JobContext,
     RoomInputOptions,
 )
-from livekit.agents.llm import ChatContext, ChatMessage
 from livekit.plugins import cartesia, deepgram, silero
 
-# Imports from apps/api via the path-dep
-from app.agents import companion, safety
-from app.crisis.card import CRISIS_CARD_TEXT
-from app.db import repos
-from app.db.session import get_sessionmaker
-
 from worker.api_client import VoiceApiClient, heartbeat_loop
+from worker.companion_llm import CompanionLLM
 from worker.settings import get_settings
 
 logger = logging.getLogger(__name__)
@@ -33,145 +32,17 @@ logger = logging.getLogger(__name__)
 _PARTICIPANT_KIND_STANDARD = 0
 
 
-@asynccontextmanager
-async def db_session():
-    """Async-with wrapper around the SQLAlchemy session factory."""
-    sm = get_sessionmaker()
-    async with sm() as session:
-        try:
-            yield session
-        finally:
-            await session.rollback()
-
-
-async def _load_history(conversation_id: uuid.UUID) -> list[dict]:
-    async with db_session() as session:
-        msgs = await repos.list_messages(
-            session, conversation_id=conversation_id, limit=30
-        )
-        out: list[dict] = []
-        for m in msgs:
-            if m.role in ("user", "assistant"):
-                out.append({"role": m.role, "content": m.content})
-        return out
-
-
-async def _persist_turn(
-    *,
-    conversation_id: uuid.UUID,
-    role: str,
-    content: str,
-    risk_level: str | None,
-) -> None:
-    async with db_session() as session:
-        await repos.append_message(
-            session,
-            conversation_id=conversation_id,
-            role=role,
-            content=content,
-            source="voice",
-            risk_level=risk_level,
-            token_count=max(1, len(content) // 4),
-        )
-        await session.commit()
-
-
-async def _load_profile(user_id: uuid.UUID) -> tuple[dict, str]:
-    async with db_session() as session:
-        row = await repos.get_or_create_profile(session, user_id=user_id)
-        await session.commit()
-        return row.profile, row.summary
-
-
 class CompanionAgent(Agent):
-    """The voice Companion. Same prompts as text — just shorter responses for voice."""
+    """Voice-side Companion. All actual response generation happens in the
+    CompanionLLM passed to AgentSession — this class is mostly a placeholder."""
 
-    def __init__(self, *, user_id: uuid.UUID, conversation_id: uuid.UUID):
+    def __init__(self) -> None:
         super().__init__(
-            instructions="(prompts assembled per-turn from companion.stream_reply)"
-        )
-        self._user_id = user_id
-        self._conversation_id = conversation_id
-        # Set by entrypoint() once the AgentSession is constructed so we can
-        # call shutdown() / track end_reason from inside on_user_turn_completed.
-        self._on_crisis_redirect = None  # type: ignore[assignment]
-
-    def bind_crisis_callback(self, cb) -> None:
-        """entrypoint wires up a callback so the agent can request session shutdown
-        with the right end_reason ('agent_crisis_redirect')."""
-        self._on_crisis_redirect = cb
-
-    async def on_user_turn_completed(
-        self, turn_ctx: ChatContext, new_message: ChatMessage
-    ) -> None:
-        """Called by livekit-agents when STT has a finalized user transcript."""
-        user_text = (new_message.text_content or "").strip()
-        if not user_text:
-            return
-
-        logger.info(
-            "voice_user_turn user_id=%s text=%r", self._user_id, user_text[:80]
-        )
-
-        # Load context
-        history = await _load_history(self._conversation_id)
-
-        # Safety classifier (same as Slice 1)
-        result = await safety.classify(user_text, history=history)  # type: ignore[arg-type]
-        await _persist_turn(
-            conversation_id=self._conversation_id,
-            role="user",
-            content=user_text,
-            risk_level=result.risk,
-        )
-        logger.info("voice_safety_decision risk=%s", result.risk)
-
-        if result.risk == "acute":
-            # Persist + speak the crisis card, then ask the entrypoint to end the call.
-            await _persist_turn(
-                conversation_id=self._conversation_id,
-                role="system_crisis",
-                content=CRISIS_CARD_TEXT,
-                risk_level=None,
-            )
-            session = self.session
-            handle = await session.say(CRISIS_CARD_TEXT)
-            try:
-                await handle.wait_for_playout()
-            except Exception:
-                pass
-            if self._on_crisis_redirect is not None:
-                await self._on_crisis_redirect()
-            return
-
-        # Stream the companion reply through TTS.
-        profile, summary = await _load_profile(self._user_id)
-        history_with_user = history + [{"role": "user", "content": user_text}]
-
-        # Collect the full text first so we can persist it. (We could stream
-        # directly into session.say() with an AsyncIterable, but persistence
-        # needs the final content anyway.)
-        collected: list[str] = []
-        async for piece in companion.stream_reply(
-            history=history_with_user,  # type: ignore[arg-type]
-            risk=result.risk,  # type: ignore[arg-type]
-            source="voice",
-            profile=profile,
-            summary=summary,
-        ):
-            collected.append(piece)
-        full_text = "".join(collected).strip()
-        if not full_text:
-            return
-
-        session = self.session
-        await session.say(full_text)
-
-        await _persist_turn(
-            conversation_id=self._conversation_id,
-            role="assistant",
-            content=full_text,
-            risk_level=None,
+            instructions=(
+                "You are the Companion — a warm, unhurried voice presence. "
+                "Keep replies short (1-2 sentences). Use spoken contractions. "
+                "Lead with validation, not advice."
+            ),
         )
 
 
@@ -218,6 +89,12 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.error("voice_job_bad_metadata room=%s err=%s", room_name, e)
         return
 
+    logger.info(
+        "voice_job_participant user_id=%s conv=%s",
+        user_id,
+        conversation_id,
+    )
+
     api_client = VoiceApiClient(room_name)
     start_ts = time.monotonic()
 
@@ -229,8 +106,7 @@ async def entrypoint(ctx: JobContext) -> None:
             api_key=s.cartesia_api_key,
         ),
         vad=silero.VAD.load(),
-        # llm is intentionally unset — we override response generation in
-        # CompanionAgent.on_user_turn_completed (we own companion.stream_reply).
+        llm=CompanionLLM(user_id=user_id, conversation_id=conversation_id),
     )
 
     end_reason: str = "user_hangup"
@@ -243,8 +119,7 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception as e:
             logger.warning("session_shutdown_failed: %s", e)
 
-    agent = CompanionAgent(user_id=user_id, conversation_id=conversation_id)
-    agent.bind_crisis_callback(lambda: trigger_end("agent_crisis_redirect"))
+    agent = CompanionAgent()
 
     heartbeat_task = asyncio.create_task(
         heartbeat_loop(
@@ -261,15 +136,13 @@ async def entrypoint(ctx: JobContext) -> None:
             agent=agent,
             room_input_options=RoomInputOptions(),
         )
-        # Greet the user so they know the agent is live. Short on purpose —
-        # voice prompt addendum says 1-2 sentences, no filler.
+        # Greet immediately so the user knows the agent is live.
         try:
-            greeting_handle = await session.say(
+            handle = await session.say(
                 "Hey. I'm here whenever you're ready. What's going on?",
                 allow_interruptions=True,
             )
-            # Don't await playout — user can barge-in immediately.
-            _ = greeting_handle
+            _ = handle
         except Exception as e:
             logger.warning("greeting_failed: %s", e)
         # session.start() returns once the session is up; wait for it to close.
