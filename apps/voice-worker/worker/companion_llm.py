@@ -125,7 +125,18 @@ class CompanionLLMStream(LLMStream):
     async def _run(self) -> None:
         user_text = _extract_last_user_text(self._chat_ctx)
         if not user_text:
-            logger.info("companion_llm_no_user_text")
+            # Greeting path — generate_reply with instructions= (no user
+            # message yet). Yield a short opener so TTS has something to
+            # speak; otherwise the session immediately ends.
+            logger.info("companion_llm_greeting")
+            greeting = "Hey. I'm here whenever you're ready."
+            chunk_id = uuid.uuid4().hex
+            self._event_ch.send_nowait(
+                ChatChunk(
+                    id=chunk_id,
+                    delta=ChoiceDelta(role="assistant", content=greeting),
+                )
+            )
             return
 
         logger.info(

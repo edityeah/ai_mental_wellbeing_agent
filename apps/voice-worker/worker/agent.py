@@ -34,7 +34,9 @@ _PARTICIPANT_KIND_STANDARD = 0
 
 class CompanionAgent(Agent):
     """Voice-side Companion. All actual response generation happens in the
-    CompanionLLM passed to AgentSession — this class is mostly a placeholder."""
+    CompanionLLM passed to AgentSession — this class is mostly a placeholder.
+    The greeting is triggered from `on_enter`, which fires AFTER the activity
+    is fully started (so speech scheduling is unpaused)."""
 
     def __init__(self) -> None:
         super().__init__(
@@ -44,6 +46,23 @@ class CompanionAgent(Agent):
                 "Lead with validation, not advice."
             ),
         )
+
+    async def on_enter(self) -> None:
+        # Use generate_reply (the framework-blessed greeting path) instead
+        # of bare session.say(). generate_reply runs through the LLM +
+        # scheduler properly — bare say() left scheduling paused and
+        # caused every follow-up user turn to be dropped.
+        try:
+            await self.session.generate_reply(
+                instructions=(
+                    "Greet the user warmly in one short sentence — just "
+                    "let them know you're here whenever they're ready. "
+                    "Do not ask a question yet."
+                ),
+                allow_interruptions=True,
+            )
+        except Exception as e:
+            logger.warning("greeting_failed: %s", e)
 
 
 def _parse_participant_metadata(
@@ -111,6 +130,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     end_reason: str = "user_hangup"
 
+    # Wait on this until the user disconnects from the room. Without it,
+    # the entrypoint would return after session.start() and the framework
+    # would tear the session down before the user could even speak.
+    disconnected = asyncio.Event()
+
     async def trigger_end(reason: str) -> None:
         nonlocal end_reason
         end_reason = reason
@@ -118,6 +142,11 @@ async def entrypoint(ctx: JobContext) -> None:
             session.shutdown(drain=True)
         except Exception as e:
             logger.warning("session_shutdown_failed: %s", e)
+        # Wake up the entrypoint's wait so we can run the finally block.
+        try:
+            disconnected.set()
+        except Exception:
+            pass
 
     agent = CompanionAgent()
 
@@ -130,23 +159,32 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     )
 
+    def _on_user_disconnect(p: rtc.RemoteParticipant) -> None:
+        # Only end on OUR user disconnecting, not other agents.
+        try:
+            if p.identity == str(user_id):
+                disconnected.set()
+        except Exception:
+            pass
+
+    ctx.room.on("participant_disconnected", _on_user_disconnect)
+
     try:
         await session.start(
             room=ctx.room,
             agent=agent,
-            room_input_options=RoomInputOptions(),
+            # Bind to THIS user's audio. Without participant_identity,
+            # the agent attaches to participant=null — STT receives no
+            # audio and every user turn is silently dropped.
+            room_input_options=RoomInputOptions(
+                participant_identity=str(user_id),
+            ),
         )
-        # Greet immediately so the user knows the agent is live.
-        try:
-            handle = await session.say(
-                "Hey. I'm here whenever you're ready. What's going on?",
-                allow_interruptions=True,
-            )
-            _ = handle
-        except Exception as e:
-            logger.warning("greeting_failed: %s", e)
-        # session.start() returns once the session is up; wait for it to close.
-        await session.wait_for_inactive()
+        # Hold here until the user disconnects (or the worker is shut down
+        # externally via trigger_end). Without this hold, the framework
+        # would tear the session down right after the greeting plays —
+        # before the user has a chance to say anything.
+        await disconnected.wait()
     except Exception as e:
         logger.exception("voice_job_failed room=%s err=%s", room_name, e)
         end_reason = "error"
