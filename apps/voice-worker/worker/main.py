@@ -65,6 +65,11 @@ def main() -> None:
             ws_url=settings.livekit_url,
             api_key=settings.livekit_api_key,
             api_secret=settings.livekit_api_secret,
+            # Must match VOICE_AGENT_NAME in apps/api/app/voice/livekit_tokens.py.
+            # The API token now includes a RoomAgentDispatch entry naming
+            # this agent, so LiveKit Cloud explicitly dispatches us to the
+            # room the moment the user joins.
+            agent_name="companion",
         )
     )
 
