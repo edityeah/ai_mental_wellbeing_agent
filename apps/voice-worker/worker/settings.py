@@ -11,6 +11,9 @@ class WorkerSettings(BaseSettings):
         env_file=Path(__file__).parent.parent.parent / "api" / ".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # See apps/api/app/settings.py — empty shell env vars were
+        # shadowing real .env values.
+        env_ignore_empty=True,
     )
 
     # LiveKit
@@ -21,7 +24,7 @@ class WorkerSettings(BaseSettings):
     # STT / TTS
     deepgram_api_key: str = ""
     cartesia_api_key: str = ""
-    cartesia_voice_id: str = "5345cf08-6f37-424d-a5d9-8ae1101b9377"  # warm female Indian-English (a Cartesia default — Aditya can swap later)
+    cartesia_voice_id: str = "4877b818-c7fe-4c89-b1cf-eadf8e23da72"  # Aditya's picked voice (multilingual: Hindi + English)
 
     # LLM
     anthropic_api_key: str = ""

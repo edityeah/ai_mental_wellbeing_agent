@@ -8,7 +8,13 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agents import companion, profile_updater, safety, title as title_gen
+from app.agents import (
+    companion,
+    profile_updater,
+    recap as recap_gen,
+    safety,
+    title as title_gen,
+)
 from app.agents.safety import HistoryTurn
 from app.crisis.card import CRISIS_CARD_TEXT
 from app.db import repos
@@ -224,17 +230,135 @@ async def maybe_generate_title(
     *,
     user_id: uuid.UUID,
     conversation_id: uuid.UUID,
-    first_user_text: str,
+    first_user_text: str | None = None,
 ) -> None:
-    """Generate an auto-title for a conversation if it still has the default title.
+    """Auto-title a conversation if it still has the default title and
+    enough has been said to extract a topic.
 
-    Runs as a background task so it doesn't extend the chat-turn latency.
+    Tries every time it's called (cheap — Haiku, ~30 output tokens).
+    Returns early if:
+      * the conversation already has a non-default title (someone or
+        a prior run titled it)
+      * the only content is a one-liner like "hello" / "can you hear me?"
+        — Haiku has nothing to work with and would just return the
+        default sentinel again
+
+    Runs as a background task so it doesn't extend chat-turn latency.
     """
     conv = await repos.get_conversation(
         session, conversation_id=conversation_id, user_id=user_id
     )
     if conv is None or conv.title != "New conversation":
         return
-    new_title = await title_gen.generate_title(first_user_text)
+
+    # Pull the first ~6 messages — enough for a Haiku to spot the theme,
+    # not so many it wastes tokens. Skip system_crisis cards (they're
+    # canned text, not user content).
+    msgs = await repos.list_messages(
+        session, conversation_id=conversation_id, limit=6
+    )
+    relevant = [m for m in msgs if m.role in ("user", "assistant")]
+    if not relevant:
+        return
+
+    # Need some real substance before titling — a single "Hello?" gives
+    # Haiku no topic to extract. Heuristic: at least one message with
+    # 25+ characters of content.
+    has_substance = any(len((m.content or "").strip()) >= 25 for m in relevant)
+    if not has_substance:
+        # Fall back to the caller-provided first message if it has body.
+        if first_user_text and len(first_user_text.strip()) >= 25:
+            excerpt = f"User: {first_user_text.strip()}"
+        else:
+            return  # Try again next turn.
+    else:
+        lines: list[str] = []
+        for m in relevant:
+            label = "User" if m.role == "user" else "Companion"
+            lines.append(f"{label}: {(m.content or '').strip()}")
+        excerpt = "\n".join(lines)
+
+    new_title = await title_gen.generate_title(excerpt)
+    if new_title == "New conversation":
+        # Model couldn't title it from what we showed. Leave the default
+        # so the next turn gets another shot with more context.
+        return
     conv.title = new_title
+    await session.commit()
+
+
+# ── Recap (Care Plan) for text chat ──────────────────────────────────────
+# Voice fires recap at call end (one obvious "session boundary"). Text has
+# no natural boundary, so we instead refresh the recap on a cadence:
+#   • Wait until the conversation has real substance
+#     (>= MIN_USER_TURNS user turns, >= MIN_TOTAL_CHARS of content)
+#   • Only generate a *new* recap if 5+ new user turns have happened
+#     since the last recap, OR if there's no recap yet
+# A new recap is appended as a new system_recap message; older ones stay
+# in the thread so the user can see how their plan has evolved.
+
+_TEXT_RECAP_MIN_USER_TURNS = 4
+_TEXT_RECAP_MIN_TOTAL_CHARS = 300
+_TEXT_RECAP_NEW_TURNS_THRESHOLD = 5
+
+
+async def maybe_generate_recap(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    conversation_id: uuid.UUID,
+) -> None:
+    """Generate a Care Plan recap for a text conversation if it's reached
+    enough substance since the last recap. Safe to call after every turn —
+    short-circuits cheaply when there's nothing new to recap."""
+    conv = await repos.get_conversation(
+        session, conversation_id=conversation_id, user_id=user_id
+    )
+    if conv is None:
+        return
+
+    msgs = await repos.list_messages(
+        session, conversation_id=conversation_id, limit=200
+    )
+    if not msgs:
+        return
+
+    relevant = [m for m in msgs if m.role in ("user", "assistant")]
+    user_turns = sum(1 for m in relevant if m.role == "user")
+    total_chars = sum(len((m.content or "").strip()) for m in relevant)
+
+    if (
+        user_turns < _TEXT_RECAP_MIN_USER_TURNS
+        or total_chars < _TEXT_RECAP_MIN_TOTAL_CHARS
+    ):
+        return
+
+    # Find the last existing recap (if any) and count user turns since.
+    last_recap = next(
+        (m for m in reversed(msgs) if m.role == "system_recap"), None
+    )
+    if last_recap is not None:
+        new_user_turns_since = sum(
+            1
+            for m in msgs
+            if m.role == "user" and m.created_at > last_recap.created_at
+        )
+        if new_user_turns_since < _TEXT_RECAP_NEW_TURNS_THRESHOLD:
+            return
+
+    text = await recap_gen.generate_recap(
+        [{"role": m.role, "content": m.content} for m in relevant]
+    )
+    if not text:
+        return
+
+    await repos.append_message(
+        session,
+        conversation_id=conversation_id,
+        role="system_recap",
+        content=text,
+        source="text",
+        risk_level=None,
+        token_count=max(1, len(text) // 4),
+    )
     await session.commit()

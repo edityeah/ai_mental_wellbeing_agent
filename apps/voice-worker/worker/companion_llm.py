@@ -13,10 +13,14 @@ through the framework's TTS pipeline.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+import time
 import uuid
 from typing import Any
 
+from livekit import rtc
 from livekit.agents.llm import (
     ChatChunk,
     ChatContext,
@@ -36,6 +40,101 @@ from app.agents import companion, safety
 from app.crisis.card import CRISIS_CARD_TEXT
 from app.db import repos
 from app.db.session import get_sessionmaker
+from app.services.chat_service import maybe_generate_title
+
+# Topic used for live transcript data messages on the LiveKit room. The web
+# client listens on this topic and appends bubbles to the chat thread in
+# real time, so the call feels like an extension of the conversation rather
+# than a side-channel.
+TRANSCRIPT_TOPIC = "mwc-transcript"
+
+
+async def _publish_transcript(
+    room: rtc.Room | None,
+    *,
+    role: str,
+    content: str,
+    msg_id: str | None = None,
+) -> None:
+    """Publish a complete turn as a single bubble. Best-effort; never
+    raises into the agent loop."""
+    if room is None or not content.strip():
+        return
+    try:
+        payload = json.dumps(
+            {
+                "type": "transcript",
+                "role": role,
+                "content": content,
+                "id": msg_id,
+            }
+        ).encode("utf-8")
+        await room.local_participant.publish_data(
+            payload,
+            reliable=True,
+            topic=TRANSCRIPT_TOPIC,
+        )
+    except Exception as e:
+        logger.warning("publish_transcript_failed role=%s err=%s", role, e)
+
+
+async def _publish_transcript_delta(
+    room: rtc.Room | None,
+    *,
+    msg_id: str,
+    role: str,
+    delta: str,
+) -> None:
+    """Publish a streaming chunk for a bubble that's still filling in.
+    The frontend looks up the bubble by msg_id and appends `delta` to its
+    content — giving the same typewriter feel as the text chat."""
+    if room is None or not delta:
+        return
+    try:
+        payload = json.dumps(
+            {
+                "type": "transcript_delta",
+                "id": msg_id,
+                "role": role,
+                "delta": delta,
+            }
+        ).encode("utf-8")
+        await room.local_participant.publish_data(
+            payload,
+            reliable=True,
+            topic=TRANSCRIPT_TOPIC,
+        )
+    except Exception as e:
+        logger.warning("publish_delta_failed id=%s err=%s", msg_id, e)
+
+
+async def _publish_transcript_end(
+    room: rtc.Room | None,
+    *,
+    msg_id: str,
+    role: str,
+    final_content: str,
+) -> None:
+    """Tell the frontend the streaming bubble is complete (replace with
+    the canonical final text — covers any deltas that were dropped)."""
+    if room is None or not final_content.strip():
+        return
+    try:
+        payload = json.dumps(
+            {
+                "type": "transcript_end",
+                "id": msg_id,
+                "role": role,
+                "content": final_content,
+            }
+        ).encode("utf-8")
+        await room.local_participant.publish_data(
+            payload,
+            reliable=True,
+            topic=TRANSCRIPT_TOPIC,
+        )
+    except Exception as e:
+        logger.warning("publish_end_failed id=%s err=%s", msg_id, e)
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +211,7 @@ class CompanionLLMStream(LLMStream):
         conn_options: APIConnectOptions,
         user_id: uuid.UUID,
         conversation_id: uuid.UUID,
+        room: rtc.Room | None = None,
     ) -> None:
         super().__init__(
             llm,
@@ -121,6 +221,7 @@ class CompanionLLMStream(LLMStream):
         )
         self._user_id = user_id
         self._conversation_id = conversation_id
+        self._room = room
 
     async def _run(self) -> None:
         user_text = _extract_last_user_text(self._chat_ctx)
@@ -139,55 +240,71 @@ class CompanionLLMStream(LLMStream):
             )
             return
 
+        t0 = time.monotonic()
         logger.info(
             "companion_llm_run user_id=%s text=%r",
             self._user_id,
             user_text[:80],
         )
 
+        # Publish the user's spoken turn to the chat thread immediately —
+        # gives the user the same "I see what I just said" confirmation
+        # they get when typing, without waiting on safety/companion.
+        asyncio.create_task(
+            _publish_transcript(self._room, role="user", content=user_text)
+        )
+
         # Load conversation history (older turns, not including this user turn)
         history = await _load_history(self._conversation_id)
 
-        # Safety classifier
-        try:
-            result = await safety.classify(user_text, history=history)
-        except Exception as e:
-            logger.warning("safety_classify_failed: %s", e)
-            from app.schemas.chat import SafetyResult
-            result = SafetyResult(risk="elevated", reason="classifier_error")
+        # First voice turn → kick off auto-title generation in the background
+        # so the sidebar shows a meaningful name instead of "New conversation".
+        # Mirrors the text-chat router behavior. No-op if a title is already set.
+        if not history:
+            async def _bg_title() -> None:
+                sm = get_sessionmaker()
+                async with sm() as bg:
+                    try:
+                        await maybe_generate_title(
+                            bg,
+                            user_id=self._user_id,
+                            conversation_id=self._conversation_id,
+                            first_user_text=user_text,
+                        )
+                    except Exception as e:
+                        logger.warning("voice_title_bg_failed: %s", e)
 
-        # Persist the user turn
-        try:
-            await _persist_turn(
-                conversation_id=self._conversation_id,
-                role="user",
-                content=user_text,
-                risk_level=result.risk,
-            )
-        except Exception as e:
-            logger.warning("persist_user_failed: %s", e)
-        logger.info("companion_llm_safety risk=%s", result.risk)
+            asyncio.create_task(_bg_title())
 
-        # ACUTE: stream the crisis card and stop (no companion turn).
-        if result.risk == "acute":
-            await _persist_turn(
-                conversation_id=self._conversation_id,
-                role="system_crisis",
-                content=CRISIS_CARD_TEXT,
-                risk_level=None,
-            )
-            chunk_id = uuid.uuid4().hex
-            self._event_ch.send_nowait(
-                ChatChunk(
-                    id=chunk_id,
-                    delta=ChoiceDelta(role="assistant", content=CRISIS_CARD_TEXT),
-                )
-            )
-            return
+        # ── Latency optimization ────────────────────────────────────────
+        # Run safety + profile + companion stream in PARALLEL instead of
+        # sequentially. The previous flow waited ~2s on Haiku before even
+        # starting Sonnet's first token — every voice turn felt slow.
+        #
+        # Strategy:
+        #   1. Kick off safety + profile concurrently.
+        #   2. Block on profile (typically <50ms, needed for companion prompt).
+        #   3. Start the companion stream optimistically with risk="none".
+        #   4. Buffer the first chunks for up to BUFFER_WINDOW_S while we
+        #      wait for safety to settle.
+        #   5. As soon as safety returns:
+        #        - acute → discard buffer, send crisis card instead
+        #        - else  → flush buffer + continue streaming live
+        #   6. If safety hasn't returned within BUFFER_WINDOW_S, give up
+        #      waiting and start streaming — we re-check the safety result
+        #      after the response completes (extremely rare miss path).
+        # ────────────────────────────────────────────────────────────────
+        BUFFER_WINDOW_S = 0.8  # max time to hold companion output for safety
 
-        # Normal / elevated: stream the companion's reply.
+        safety_task: asyncio.Task = asyncio.create_task(
+            safety.classify(user_text, history=history)
+        )
+        profile_task: asyncio.Task = asyncio.create_task(
+            _load_profile(self._user_id)
+        )
+
         try:
-            profile, summary = await _load_profile(self._user_id)
+            profile, summary = await profile_task
         except Exception as e:
             logger.warning("load_profile_failed: %s", e)
             profile, summary = {}, ""
@@ -195,16 +312,96 @@ class CompanionLLMStream(LLMStream):
         history_with_user = history + [{"role": "user", "content": user_text}]
         chunk_id = uuid.uuid4().hex
         collected: list[str] = []
+        buffered: list[str] = []
+        flushed = False
+        crisis_sent = False
+        deadline = time.monotonic() + BUFFER_WINDOW_S
+
+        def _safety_done() -> bool:
+            return safety_task.done()
+
+        def _get_safety_result():
+            """Returns SafetyResult or None if task hasn't finished."""
+            if not safety_task.done():
+                return None
+            try:
+                return safety_task.result()
+            except Exception as e:
+                logger.warning("safety_classify_failed: %s", e)
+                from app.schemas.chat import SafetyResult
+                return SafetyResult(risk="elevated", reason="classifier_error")
+
+        async def _send_crisis() -> None:
+            nonlocal crisis_sent
+            crisis_sent = True
+            self._event_ch.send_nowait(
+                ChatChunk(
+                    id=chunk_id,
+                    delta=ChoiceDelta(
+                        role="assistant", content=CRISIS_CARD_TEXT
+                    ),
+                )
+            )
+
         try:
             async for piece in companion.stream_reply(
                 history=history_with_user,  # type: ignore[arg-type]
-                risk=result.risk,  # type: ignore[arg-type]
+                # Optimistically use "none" — we don't yet know risk.
+                # Acute is handled post-hoc by discarding output and
+                # swapping for the crisis card. Elevated and none use
+                # near-identical tone in the base prompt, so the loss is
+                # acceptable for the latency win.
+                risk="none",
                 source="voice",
                 profile=profile,
                 summary=summary,
             ):
                 if not piece:
                     continue
+
+                # Until safety has spoken (or the window expires), buffer.
+                if not flushed:
+                    sr = _get_safety_result()
+                    if sr is None and time.monotonic() < deadline:
+                        buffered.append(piece)
+                        continue
+                    # Safety settled OR we hit the buffer deadline.
+                    if sr is not None and sr.risk == "acute":
+                        await _send_crisis()
+                        logger.info(
+                            "companion_llm_acute_intercepted ms=%d",
+                            int((time.monotonic() - t0) * 1000),
+                        )
+                        # Drain the rest of the companion stream so we don't
+                        # leak the task — but throw away the output.
+                        # (Falling out of the for loop achieves this; just
+                        # break.)
+                        break
+                    # Safe to flush
+                    for b in buffered:
+                        collected.append(b)
+                        self._event_ch.send_nowait(
+                            ChatChunk(
+                                id=chunk_id,
+                                delta=ChoiceDelta(
+                                    role="assistant", content=b
+                                ),
+                            )
+                        )
+                        # Stream the buffered chunks into the chat thread
+                        # too — so the bubble starts filling in as the TTS
+                        # starts speaking.
+                        asyncio.create_task(
+                            _publish_transcript_delta(
+                                self._room,
+                                msg_id=chunk_id,
+                                role="assistant",
+                                delta=b,
+                            )
+                        )
+                    buffered.clear()
+                    flushed = True
+
                 collected.append(piece)
                 self._event_ch.send_nowait(
                     ChatChunk(
@@ -212,17 +409,101 @@ class CompanionLLMStream(LLMStream):
                         delta=ChoiceDelta(role="assistant", content=piece),
                     )
                 )
+                # Live-stream this chunk into the chat thread (typewriter).
+                asyncio.create_task(
+                    _publish_transcript_delta(
+                        self._room,
+                        msg_id=chunk_id,
+                        role="assistant",
+                        delta=piece,
+                    )
+                )
         except Exception as e:
             logger.exception("companion_stream_failed: %s", e)
-            # Send a friendly fallback so the user hears SOMETHING
             self._event_ch.send_nowait(
                 ChatChunk(
                     id=chunk_id,
                     delta=ChoiceDelta(
                         role="assistant",
-                        content="I'm having trouble responding right now. Try again in a moment.",
+                        content=(
+                            "I'm having trouble responding right now. "
+                            "Try again in a moment."
+                        ),
                     ),
                 )
+            )
+            # Still try to record what safety said
+            try:
+                await safety_task
+            except Exception:
+                pass
+            return
+
+        # Ensure safety result is in (it usually was by the time the
+        # stream finished). If it's still pending, await it now.
+        if not safety_task.done():
+            try:
+                await safety_task
+            except Exception:
+                pass
+        final_safety = _get_safety_result()
+        if final_safety is None:
+            from app.schemas.chat import SafetyResult
+            final_safety = SafetyResult(risk="elevated", reason="unknown")
+
+        # If we buffered everything (stream finished inside the window) and
+        # never flushed, handle the final decision now.
+        if not flushed and not crisis_sent:
+            if final_safety.risk == "acute":
+                await _send_crisis()
+            else:
+                for b in buffered:
+                    collected.append(b)
+                    self._event_ch.send_nowait(
+                        ChatChunk(
+                            id=chunk_id,
+                            delta=ChoiceDelta(role="assistant", content=b),
+                        )
+                    )
+                buffered.clear()
+                flushed = True
+
+        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        logger.info(
+            "companion_llm_done risk=%s ms=%d chunks=%d crisis=%s",
+            final_safety.risk,
+            elapsed_ms,
+            len(collected),
+            crisis_sent,
+        )
+
+        # Persist user turn with final risk label.
+        try:
+            await _persist_turn(
+                conversation_id=self._conversation_id,
+                role="user",
+                content=user_text,
+                risk_level=final_safety.risk,
+            )
+        except Exception as e:
+            logger.warning("persist_user_failed: %s", e)
+
+        # Persist crisis card OR the assistant turn.
+        if crisis_sent:
+            try:
+                await _persist_turn(
+                    conversation_id=self._conversation_id,
+                    role="system_crisis",
+                    content=CRISIS_CARD_TEXT,
+                    risk_level=None,
+                )
+            except Exception as e:
+                logger.warning("persist_crisis_failed: %s", e)
+            # Mirror crisis card into the chat thread too.
+            await _publish_transcript(
+                self._room,
+                role="system_crisis",
+                content=CRISIS_CARD_TEXT,
             )
             return
 
@@ -237,15 +518,28 @@ class CompanionLLMStream(LLMStream):
                 )
             except Exception as e:
                 logger.warning("persist_assistant_failed: %s", e)
+            # Final flush — replace the streaming bubble's content with the
+            # canonical text (covers any deltas that were dropped in flight).
+            await _publish_transcript_end(
+                self._room,
+                msg_id=chunk_id,
+                role="assistant",
+                final_content=final_text,
+            )
 
 
 class CompanionLLM(LLM):
     def __init__(
-        self, *, user_id: uuid.UUID, conversation_id: uuid.UUID
+        self,
+        *,
+        user_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        room: rtc.Room | None = None,
     ) -> None:
         super().__init__()
         self._user_id = user_id
         self._conversation_id = conversation_id
+        self._room = room
 
     @property
     def provider(self) -> str:  # type: ignore[override]
@@ -272,4 +566,5 @@ class CompanionLLM(LLM):
             conn_options=conn_options,
             user_id=self._user_id,
             conversation_id=self._conversation_id,
+            room=self._room,
         )

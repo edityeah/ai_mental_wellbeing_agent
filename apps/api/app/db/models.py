@@ -30,6 +30,7 @@ class MessageRole(str, enum.Enum):
     user = "user"
     assistant = "assistant"
     system_crisis = "system_crisis"
+    system_recap = "system_recap"
 
 
 class MessageSource(str, enum.Enum):
@@ -106,7 +107,8 @@ class Message(Base):
     __table_args__ = (
         Index("ix_messages_conv_created", "conversation_id", "created_at"),
         CheckConstraint(
-            "role IN ('user','assistant','system_crisis')", name="ck_messages_role"
+            "role IN ('user','assistant','system_crisis','system_recap')",
+            name="ck_messages_role",
         ),
         CheckConstraint("source IN ('text','voice')", name="ck_messages_source"),
         CheckConstraint(

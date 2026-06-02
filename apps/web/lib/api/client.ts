@@ -1,6 +1,7 @@
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import type {
   ConversationOut,
+  InsightsOut,
   MeOut,
   MessageOut,
 } from "@/lib/api/types";
@@ -59,6 +60,7 @@ export const api = {
   },
   listMessages: (id: string) =>
     jsonRequest<MessageOut[]>(`/conversations/${id}/messages`),
+  insights: () => jsonRequest<InsightsOut>("/insights"),
 };
 
 export { BASE as API_BASE };

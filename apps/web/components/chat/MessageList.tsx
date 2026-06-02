@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { MessageOut } from "@/lib/api/types";
 import { CrisisCard } from "./CrisisCard";
 import { MessageBubble } from "./MessageBubble";
+import { RecapCard } from "./RecapCard";
 
 function TypingBubble() {
   return (
@@ -25,10 +26,16 @@ function EmptyState() {
         <h2 className="font-serif text-xl text-sage mb-2">
           I&apos;m here to be a steady presence.
         </h2>
-        <p className="text-sm text-sage-light leading-relaxed">
+        <p className="text-sm text-sage-light leading-relaxed mb-4">
           There&apos;s no script. Share whatever&apos;s on your mind —
           something heavy, something small, or just how your day went.
         </p>
+        <a
+          href="/insights"
+          className="inline-block text-sm text-sage hover:underline"
+        >
+          See what we&apos;ve been talking about →
+        </a>
       </div>
     </div>
   );
@@ -60,13 +67,15 @@ export function MessageList({
 
   return (
     <div className="flex-1 overflow-y-auto px-3 md:px-6 py-4 md:py-6 space-y-4 bg-cream">
-      {messages.map((m) =>
-        m.role === "system_crisis" ? (
-          <CrisisCard key={m.id} content={m.content} />
-        ) : (
-          <MessageBubble key={m.id} role={m.role} content={m.content} />
-        ),
-      )}
+      {messages.map((m) => {
+        if (m.role === "system_crisis") {
+          return <CrisisCard key={m.id} content={m.content} />;
+        }
+        if (m.role === "system_recap") {
+          return <RecapCard key={m.id} content={m.content} />;
+        }
+        return <MessageBubble key={m.id} role={m.role} content={m.content} />;
+      })}
       {showStreamingBubble && (
         <MessageBubble role="assistant" content={streamingText!} />
       )}

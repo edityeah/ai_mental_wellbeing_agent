@@ -14,7 +14,7 @@ class ChatRequest(BaseModel):
 
 class MessageOut(BaseModel):
     id: uuid.UUID
-    role: Literal["user", "assistant", "system_crisis"]
+    role: Literal["user", "assistant", "system_crisis", "system_recap"]
     source: Literal["text", "voice"]
     content: str
     risk_level: Literal["none", "elevated", "acute"] | None

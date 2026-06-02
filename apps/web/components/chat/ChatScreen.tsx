@@ -372,6 +372,90 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         open={callOpen}
         conversationId={activeId}
         onClose={() => setCallOpen(false)}
+        onLiveTranscript={(t) => {
+          // Three packet kinds from the voice worker:
+          //   • final  → append a whole bubble (user STT, crisis cards)
+          //   • delta  → append a chunk to an in-progress assistant bubble
+          //              (creates the bubble on first delta), giving the
+          //              same typewriter feel the text chat has
+          //   • end    → bubble is complete, replace its content with the
+          //              canonical final text (covers any dropped deltas)
+          setMessages((prev) => {
+            if (t.kind === "final") {
+              // Skip if it's already the last bubble (race between
+              // delta-end and a refetch).
+              const last = prev[prev.length - 1];
+              if (
+                last &&
+                last.role === t.role &&
+                last.content.trim() === t.content.trim()
+              ) {
+                return prev;
+              }
+              const id = t.id
+                ? `live-${t.id}`
+                : `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+              return [
+                ...prev,
+                {
+                  id,
+                  role: t.role,
+                  source: "voice",
+                  content: t.content,
+                  risk_level: null,
+                  created_at: new Date().toISOString(),
+                },
+              ];
+            }
+
+            const liveId = `live-${t.id}`;
+            const idx = prev.findIndex((m) => m.id === liveId);
+
+            if (t.kind === "delta") {
+              if (idx === -1) {
+                // First delta — create the bubble.
+                return [
+                  ...prev,
+                  {
+                    id: liveId,
+                    role: t.role,
+                    source: "voice",
+                    content: t.delta,
+                    risk_level: null,
+                    created_at: new Date().toISOString(),
+                  },
+                ];
+              }
+              // Append delta to existing bubble.
+              const next = prev.slice();
+              next[idx] = {
+                ...next[idx],
+                content: next[idx].content + t.delta,
+              };
+              return next;
+            }
+
+            // kind === "end" — replace content with the canonical final text.
+            if (idx === -1) {
+              // Never saw a delta (rare — entire response fit in pre-flush
+              // safety buffer). Append the final as a fresh bubble.
+              return [
+                ...prev,
+                {
+                  id: liveId,
+                  role: t.role,
+                  source: "voice",
+                  content: t.content,
+                  risk_level: null,
+                  created_at: new Date().toISOString(),
+                },
+              ];
+            }
+            const next = prev.slice();
+            next[idx] = { ...next[idx], content: t.content };
+            return next;
+          });
+        }}
         onCallEnded={async () => {
           if (!activeId) return;
           try {

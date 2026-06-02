@@ -8,6 +8,13 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         extra="ignore",
+        # Treat empty env vars as "not set" so a shell that exports e.g.
+        # `ANTHROPIC_API_KEY=` (empty) doesn't shadow the real value in
+        # .env. This bit us twice — empty env vars were silently making
+        # every Anthropic call fail with "Could not resolve authentication
+        # method" and the chat would fall back to "Sorry — I had trouble
+        # responding right now."
+        env_ignore_empty=True,
     )
 
     database_url: str

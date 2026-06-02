@@ -9,7 +9,12 @@ from app.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
-async def generate_title(first_user_message: str) -> str:
+async def generate_title(conversation_excerpt: str) -> str:
+    """Generate a 3-6 word title from a multi-turn excerpt of the
+    conversation. Pass the first ~6 messages joined as labeled lines —
+    a single "Hello?" rarely contains enough signal to title from.
+    Returns the literal sentinel "New conversation" on any failure so
+    callers can detect a failed attempt and retry later."""
     settings = get_settings()
     system = load("title_generator")
     try:
@@ -18,7 +23,7 @@ async def generate_title(first_user_message: str) -> str:
             model=settings.anthropic_haiku_model,
             max_tokens=30,
             system=system,
-            messages=[{"role": "user", "content": first_user_message}],
+            messages=[{"role": "user", "content": conversation_excerpt}],
         )
         raw = response.content[0].text  # type: ignore[union-attr]
     except Exception as e:
@@ -26,6 +31,9 @@ async def generate_title(first_user_message: str) -> str:
         return "New conversation"
 
     cleaned = raw.strip().strip("\"'").rstrip(".!?")
-    if not cleaned or len(cleaned) > 80:
+    # The model sometimes returns the literal default when it can't
+    # extract a topic — treat that as a non-title so the caller knows
+    # to try again later when there's more context.
+    if not cleaned or len(cleaned) > 80 or cleaned.lower() == "new conversation":
         return "New conversation"
     return cleaned

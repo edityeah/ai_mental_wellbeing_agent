@@ -1,5 +1,5 @@
 export type Risk = "none" | "elevated" | "acute";
-export type MessageRole = "user" | "assistant" | "system_crisis";
+export type MessageRole = "user" | "assistant" | "system_crisis" | "system_recap";
 export type MessageSource = "text" | "voice";
 
 export interface ConversationOut {
@@ -26,6 +26,21 @@ export interface MeOut {
   daily_text_msg_cap: number;
   voice_seconds_used_today: number;
   voice_seconds_cap: number;
+}
+
+export interface InsightRecap {
+  id: string;
+  conversation_id: string;
+  conversation_title: string;
+  source: MessageSource;
+  content: string;
+  created_at: string;
+}
+
+export interface InsightsOut {
+  profile: Record<string, unknown>;
+  summary: string;
+  recent_recaps: InsightRecap[];
 }
 
 export type SseEvent =

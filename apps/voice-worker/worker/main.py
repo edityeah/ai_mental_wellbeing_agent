@@ -27,8 +27,15 @@ def _bootstrap_env() -> None:
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            # Don't overwrite anything the shell already exported
-            if key and key not in os.environ:
+            # Set from .env unless the shell ACTUALLY provided a non-empty
+            # value. An exported but empty var (e.g. `export FOO=` in a
+            # parent shell) used to leak through and shadow the real
+            # secret — leading to "Could not resolve authentication
+            # method" from the Anthropic SDK mid-call.
+            if not key:
+                continue
+            existing = os.environ.get(key)
+            if existing is None or existing == "":
                 os.environ[key] = val
 
 

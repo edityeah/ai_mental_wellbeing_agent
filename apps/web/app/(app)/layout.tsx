@@ -1,5 +1,6 @@
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 import { redirect } from "next/navigation";
+import { InstallPrompt } from "@/components/pwa/InstallPrompt";
 
 export default async function AppLayout({
   children,
@@ -12,5 +13,10 @@ export default async function AppLayout({
   } = await supabase.auth.getUser();
   if (!user) redirect("/login");
 
-  return <div className="h-screen-dvh flex">{children}</div>;
+  return (
+    <div className="h-screen-dvh flex">
+      {children}
+      <InstallPrompt />
+    </div>
+  );
 }

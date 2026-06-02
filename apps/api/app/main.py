@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.logging_setup import configure_logging
 from app.routers import chat as chat_router
 from app.routers import conversations as conversations_router
+from app.routers import insights as insights_router
 from app.routers import me as me_router
 from app.routers import voice as voice_router
 
@@ -23,6 +24,7 @@ app.include_router(me_router.router, prefix="/api/v1", tags=["me"])
 app.include_router(conversations_router.router, prefix="/api/v1", tags=["conversations"])
 app.include_router(chat_router.router, prefix="/api/v1", tags=["chat"])
 app.include_router(voice_router.router, prefix="/api/v1", tags=["voice"])
+app.include_router(insights_router.router, prefix="/api/v1", tags=["insights"])
 
 
 @app.get("/api/v1/health")

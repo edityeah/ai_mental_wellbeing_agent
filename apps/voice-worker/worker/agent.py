@@ -118,14 +118,30 @@ async def entrypoint(ctx: JobContext) -> None:
     start_ts = time.monotonic()
 
     session = AgentSession(
-        stt=deepgram.STT(model="nova-2", api_key=s.deepgram_api_key),
+        # Deepgram nova-3 with language="multi" auto-detects between
+        # English + several major languages (Hindi included) per
+        # utterance — Aditya wants the agent to follow when the user
+        # code-switches mid-call.
+        stt=deepgram.STT(
+            model="nova-3",
+            language="multi",
+            api_key=s.deepgram_api_key,
+        ),
+        # Cartesia sonic-2 is natively multilingual; the chosen voice
+        # must itself support the target languages. Swap the voice id in
+        # settings to a multilingual voice (e.g. Cartesia's Hindi-capable
+        # voices) — model handles the rest automatically.
         tts=cartesia.TTS(
             model="sonic-2",
             voice=s.cartesia_voice_id,
             api_key=s.cartesia_api_key,
         ),
         vad=silero.VAD.load(),
-        llm=CompanionLLM(user_id=user_id, conversation_id=conversation_id),
+        llm=CompanionLLM(
+            user_id=user_id,
+            conversation_id=conversation_id,
+            room=ctx.room,
+        ),
     )
 
     end_reason: str = "user_hangup"
@@ -198,6 +214,19 @@ async def entrypoint(ctx: JobContext) -> None:
             await session.aclose()
         except Exception:
             pass
+        # Generate the end-of-call Care Plan recap. Best-effort, blocking
+        # only long enough for Haiku (~1s) so the user sees it land in the
+        # chat thread by the time they tap back from the call panel.
+        try:
+            from worker.recap import generate_and_persist_recap
+
+            await generate_and_persist_recap(
+                user_id=user_id,
+                conversation_id=conversation_id,
+                room=ctx.room,
+            )
+        except Exception as e:
+            logger.warning("recap_failed conv=%s err=%s", conversation_id, e)
         duration = int(time.monotonic() - start_ts)
         await api_client.end(
             duration_seconds=duration,

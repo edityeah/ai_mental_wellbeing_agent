@@ -17,6 +17,7 @@ from app.schemas.chat import ChatRequest
 from app.services.chat_service import (
     StreamFooter,
     StreamHeader,
+    maybe_generate_recap,
     maybe_generate_title,
     maybe_run_profile_updater,
     run_chat_turn,
@@ -105,6 +106,15 @@ async def chat(
                 )
             except Exception as e:
                 logger.exception("profile_updater_bg_failed: %s", e)
+        async with sm() as bg_session:
+            try:
+                await maybe_generate_recap(
+                    bg_session,
+                    user_id=claims.user_id,
+                    conversation_id=body.conversation_id,
+                )
+            except Exception as e:
+                logger.exception("recap_bg_failed: %s", e)
 
     background.add_task(_post_response)
 

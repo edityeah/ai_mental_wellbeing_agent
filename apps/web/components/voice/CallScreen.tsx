@@ -11,6 +11,7 @@ import {
 } from "livekit-client";
 import { requestVoiceToken } from "@/lib/api/voice";
 import { cn } from "@/lib/cn";
+import type { MessageRole } from "@/lib/api/types";
 
 type CallState =
   | "idle"
@@ -21,11 +22,28 @@ type CallState =
   | "error";
 type ErrorKind = "mic_permission" | "no_mic" | "generic";
 
+// Topic the voice worker publishes transcript packets on. Must match
+// TRANSCRIPT_TOPIC in apps/voice-worker/worker/companion_llm.py.
+const TRANSCRIPT_TOPIC = "mwc-transcript";
+
+export type LiveTranscript =
+  // Final whole turn (e.g. the user's spoken transcript once Deepgram
+  // finalizes, or a crisis card).
+  | { kind: "final"; id?: string; role: MessageRole; content: string }
+  // Incremental token from the assistant — append to bubble matched by id.
+  | { kind: "delta"; id: string; role: MessageRole; delta: string }
+  // Stream ended for a bubble — replace its content with `content` (covers
+  // any deltas that may have been dropped over the data channel).
+  | { kind: "end"; id: string; role: MessageRole; content: string };
+
 interface Props {
   open: boolean;
   conversationId: string | null;
   onClose: () => void;
   onCallEnded: () => void;
+  // Fires once per finalized turn during a call so the chat thread can
+  // append a bubble in real time.
+  onLiveTranscript?: (t: LiveTranscript) => void;
 }
 
 function MicOnIcon() {
@@ -74,6 +92,7 @@ export function CallScreen({
   conversationId,
   onClose,
   onCallEnded,
+  onLiveTranscript,
 }: Props) {
   const [state, setState] = useState<CallState>("idle");
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -134,6 +153,54 @@ export function CallScreen({
           const el = (audioElRef.current ??= document.createElement("audio"));
           el.autoplay = true;
           track.attach(el);
+        }
+      },
+    );
+
+    // The voice worker publishes three packet shapes on TRANSCRIPT_TOPIC:
+    //   - transcript        → a whole finalized turn (e.g. user STT)
+    //   - transcript_delta  → an incremental token chunk for an assistant
+    //                          bubble that's still being generated
+    //   - transcript_end    → that bubble is now complete (replace text)
+    // The chat thread renders these as a single growing bubble, giving
+    // the same typewriter feel as the text chat.
+    room.on(
+      RoomEvent.DataReceived,
+      (payload, _participant, _kind, topic) => {
+        if (topic !== TRANSCRIPT_TOPIC || !onLiveTranscript) return;
+        try {
+          const text = new TextDecoder().decode(payload);
+          const msg = JSON.parse(text) as {
+            type: string;
+            id?: string;
+            role: MessageRole;
+            content?: string;
+            delta?: string;
+          };
+          if (msg.type === "transcript" && msg.content) {
+            onLiveTranscript({
+              kind: "final",
+              id: msg.id,
+              role: msg.role,
+              content: msg.content,
+            });
+          } else if (msg.type === "transcript_delta" && msg.id && msg.delta) {
+            onLiveTranscript({
+              kind: "delta",
+              id: msg.id,
+              role: msg.role,
+              delta: msg.delta,
+            });
+          } else if (msg.type === "transcript_end" && msg.id && msg.content) {
+            onLiveTranscript({
+              kind: "end",
+              id: msg.id,
+              role: msg.role,
+              content: msg.content,
+            });
+          }
+        } catch {
+          /* malformed packet, ignore */
         }
       },
     );
