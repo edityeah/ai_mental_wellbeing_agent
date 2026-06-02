@@ -1,105 +1,141 @@
-# Deployment
+# Deployment — Render + Supabase
 
-Three deployable units. Pick a target per unit; the recommended pairings are below.
+Three Render services + Supabase managed Postgres. ~$21/mo on Render.
 
-| Unit                 | Recommended host          | Why                                                |
-|----------------------|----------------------------|-----------------------------------------------------|
-| `apps/web` (Next.js) | **Vercel**                | First-class Next.js support, free tier covers MVP.  |
-| `apps/api` (FastAPI) | **Fly.io** or **Railway** | Long-running ASGI, websockets, Postgres in-region.  |
-| `apps/voice-worker`  | **Fly.io** or **Railway** | Long-running Python with native deps (Silero VAD).  |
-| Postgres             | **Supabase managed PG**   | Auth is already there; one place to look.           |
-| LiveKit              | **LiveKit Cloud**         | Already in use.                                     |
+| Service | Render type | Source |
+|---|---|---|
+| `mwc-api` | Web Service (Docker) | `apps/api/Dockerfile` |
+| `mwc-voice-worker` | Background Worker (Docker) | `apps/voice-worker/Dockerfile` |
+| `mwc-web` | Web Service (Docker) | `apps/web/Dockerfile` |
+| Database | Supabase managed Postgres | (existing project) |
 
-## Prerequisites
+## 1. Migrate the Supabase Postgres schema
 
-1. Supabase project with `Auth` enabled (magic-link or whatever you prefer).
-2. LiveKit Cloud project — note the `wss://` URL, API key, and secret.
-3. Anthropic API key with both Claude Sonnet 4.6 and Haiku 4.5 access.
-4. Deepgram API key (`nova-3` model access).
-5. Cartesia API key + the voice ID you want (multilingual `sonic-2`).
-
-## 1. Database
-
-Apply the schema to your production Postgres:
+From local, against your prod DB (use **session pooler** on port 5432 — DDL needs session mode):
 
 ```bash
 cd apps/api
-DATABASE_URL='postgresql+asyncpg://...:6543/postgres' uv run alembic upgrade head
+DATABASE_URL='postgresql+asyncpg://postgres.PROJECT_REF:PASSWORD@aws-X-REGION.pooler.supabase.com:5432/postgres' \
+  uv run alembic upgrade head
 ```
 
-Use the pgbouncer URL (port 6543) on Supabase for prod traffic.
-
-## 2. API (FastAPI)
-
-Build the image from the repo root so Alembic + the app module are both in scope:
+Verify all tables exist:
 
 ```bash
-docker build -f apps/api/Dockerfile -t mwc-api .
+psql 'postgresql://postgres.PROJECT_REF:PASSWORD@aws-X-REGION.pooler.supabase.com:5432/postgres' \
+  -c "\dt public.*"
 ```
 
-Deploy to Fly:
+You should see: `alembic_version`, `conversations`, `messages`, `mood_checkins`, `usage_daily`, `user_profiles`, `users`, `voice_sessions`.
+
+## 2. Create services on Render via Blueprint
+
+The repo has a `render.yaml` at the root that defines all three services.
+
+1. Render dashboard → **New +** → **Blueprint**.
+2. Connect the GitHub repo `edityeah/ai_mental_wellbeing_agent`.
+3. Render reads `render.yaml` and lists 3 services. Click **Apply**.
+4. Render creates the services and shows the "Set environment variables" screen for each. You set secrets there (next section).
+
+## 3. Set secrets (per service)
+
+### `mwc-api`
+
+Use the **transaction pooler URL** (port 6543) for runtime traffic — high concurrency, short-lived queries.
+
+| Key | Value |
+|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://postgres.PROJECT_REF:PASSWORD@aws-X-REGION.pooler.supabase.com:6543/postgres` |
+| `ANTHROPIC_API_KEY` | `sk-ant-...` |
+| `SUPABASE_URL` | `https://veaqoiloywilmnporkkf.supabase.co` |
+| `SUPABASE_ANON_KEY` | (from Supabase Project Settings → API → anon public key) |
+| `SUPABASE_JWKS_URL` | `https://veaqoiloywilmnporkkf.supabase.co/auth/v1/.well-known/jwks.json` |
+| `LIVEKIT_URL` | `wss://mental-wellbeing-wkx7tjo0.livekit.cloud` |
+| `LIVEKIT_API_KEY` | `API...` |
+| `LIVEKIT_API_SECRET` | `secret...` |
+| `VOICE_WORKER_SECRET` | (the random 32+ char string used locally) |
+| `CORS_ALLOWED_ORIGINS` | `https://wellbeing.adityeah.ai` (or your prod web origin) |
+
+### `mwc-voice-worker`
+
+Same as API, plus:
+
+| Key | Value |
+|---|---|
+| `DEEPGRAM_API_KEY` | `...` |
+| `CARTESIA_API_KEY` | `...` |
+| `API_BASE_URL` | Internal hostname Render gives the API service (e.g. `https://mwc-api.onrender.com`) |
+
+### `mwc-web`
+
+| Key | Value |
+|---|---|
+| `NEXT_PUBLIC_SUPABASE_URL` | `https://veaqoiloywilmnporkkf.supabase.co` |
+| `NEXT_PUBLIC_SUPABASE_ANON_KEY` | (same as API) |
+| `NEXT_PUBLIC_API_URL` | The API's public URL — `https://mwc-api.onrender.com` initially, then your custom `https://api.adityeah.ai` once DNS is wired |
+
+> Important: `NEXT_PUBLIC_*` vars get baked into the client JS at *build* time. Changing them requires a redeploy of the web service.
+
+## 4. First deploy
+
+In the Render dashboard each service will trigger an automatic build. Watch logs:
+
+- `mwc-api` should boot, run `alembic upgrade head` (no-op if you already migrated), and start uvicorn on `:8000`. Health check at `/api/v1/health` should return `{"ok": true}`.
+- `mwc-voice-worker` should register with LiveKit Cloud — look for `"registered worker" {"agent_name": "companion", ...}` in the logs.
+- `mwc-web` should build Next.js, output the standalone bundle, and start `node server.js` on `:3000`.
+
+Verify each:
 
 ```bash
-cd apps/api
-fly launch --image mwc-api --no-deploy
-fly secrets set $(grep -v '^#' .env.production | xargs)
-fly deploy
+curl https://mwc-api.onrender.com/api/v1/health   # → {"ok":true}
+curl -I https://mwc-web.onrender.com               # → 200
+# Voice worker has no public URL — check the service's Logs tab.
 ```
 
-The image runs `alembic upgrade head` on every boot — no separate migration step needed.
+## 5. Custom domain `wellbeing.adityeah.ai`
 
-### Required env vars
+In `mwc-web` → Settings → Custom Domain → add `wellbeing.adityeah.ai`. Render shows a CNAME to set at your DNS host. Add it. Wait 5–10 min for cert provisioning.
 
-See `apps/api/.env.production.example`. Critical: `DATABASE_URL`, `ANTHROPIC_API_KEY`, `SUPABASE_*`, `LIVEKIT_*`, `VOICE_WORKER_SECRET`.
+Optionally also add `api.adityeah.ai` to `mwc-api` for a clean API URL. If you do:
+- Update `NEXT_PUBLIC_API_URL` on `mwc-web` to `https://api.adityeah.ai`.
+- Redeploy `mwc-web` (so the new URL is baked into the client bundle).
+- Update `CORS_ALLOWED_ORIGINS` on `mwc-api` to include the new web origin.
 
-### CORS
+## 6. Supabase Auth redirect
 
-Update `allow_origins` in `apps/api/app/main.py` to your deployed web origin (e.g. `https://wellbeing.yourdomain.com`) before the first prod deploy.
+Supabase dashboard → **Authentication → URL Configuration**:
 
-## 3. Voice worker
+- **Site URL**: `https://wellbeing.adityeah.ai`
+- **Redirect URLs**: add `https://wellbeing.adityeah.ai/auth/callback`
 
-```bash
-docker build -f apps/voice-worker/Dockerfile -t mwc-voice .
-```
+Without this, magic links from production won't redirect back to your app.
 
-Same secrets as the API (it imports from `app.settings` and shares the database). It connects out to LiveKit Cloud — no inbound ports required.
+## 7. Smoke test
 
-Deploy to Fly:
+1. Open `https://wellbeing.adityeah.ai` (private/incognito window, signed-out).
+2. Sign in via magic link — email lands from `Wellbeing <wellbeing@adityeah.ai>`.
+3. Click the link → land on `/onboarding` → walk through 5 steps.
+4. Send a text message — should stream a response within ~2s.
+5. Place a voice call — should connect, agent should greet, transcripts should appear in the thread.
+6. End the call — Care Plan card should appear within 1–2s.
+7. Open `/insights` and `/profile` — your seeded data should be there.
 
-```bash
-cd apps/voice-worker
-fly launch --image mwc-voice --no-deploy
-# Same secrets as the API:
-fly secrets set $(grep -v '^#' ../api/.env.production | xargs)
-fly deploy
-```
+## 8. Rotate the DB password
 
-The worker registers under `agent_name=companion`. The API mints LiveKit tokens with `RoomAgentDispatch(agent_name="companion")` — so as long as both services point at the same LiveKit project, dispatch is automatic.
+In any chat session where I (the AI assistant) had access to your DB URL, **rotate the password** afterwards:
 
-## 4. Web
+- Supabase → Project Settings → Database → Reset database password.
+- Update `DATABASE_URL` on `mwc-api` and `mwc-voice-worker` in Render.
+- Redeploy both.
 
-```bash
-cd apps/web
-vercel link
-vercel env add NEXT_PUBLIC_SUPABASE_URL production
-vercel env add NEXT_PUBLIC_SUPABASE_ANON_KEY production
-vercel env add NEXT_PUBLIC_API_URL production
-vercel deploy --prod
-```
+## Common gotchas
 
-## Smoke test
+- **`mwc-web` build fails missing NEXT_PUBLIC_API_URL**: those vars must be set in Render *before* the first build, because they're baked into the bundle at build time, not runtime.
+- **`mwc-voice-worker` keeps crashing**: check `LIVEKIT_URL` includes the `wss://` prefix; check Anthropic / Deepgram / Cartesia keys are set.
+- **CORS errors in browser**: `CORS_ALLOWED_ORIGINS` on `mwc-api` must exactly match the web's origin (no trailing slash). Multiple origins are comma-separated.
+- **Magic link redirects to `localhost:3000` in prod**: Supabase Auth URL Configuration wasn't updated. Fix in step 6.
 
-After all three are deployed:
+## Observability (future)
 
-1. `curl https://api.your-domain.com/api/v1/health` → `{"ok": true}`.
-2. Open `https://wellbeing.your-domain.com`, sign in via magic link.
-3. Send one text message — should stream a response.
-4. Place a voice call — should connect within 2s, transcripts should appear in the chat thread.
-5. End the call — a Care Plan card should appear within ~2s.
-6. Open `/insights` — profile and recap should be there.
-
-## Observability (optional next step)
-
-- **Sentry**: add `sentry-sdk[fastapi]` to `apps/api/pyproject.toml` and `init()` in `app/main.py`. Same for the worker.
-- **Logs**: Fly and Railway both stream stdout; piping to a Logtail / Axiom is one env var.
-- **Cost alerts**: Anthropic and LiveKit both have usage dashboards — set budget alarms before going public.
+- **Sentry**: add `sentry-sdk[fastapi]` to `apps/api/pyproject.toml`, init in `app/main.py`. Same for the worker. Frontend: `@sentry/nextjs`.
+- **Cost alerts**: Anthropic + LiveKit both have usage dashboards. Set budget alarms before going public.

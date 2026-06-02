@@ -1,0 +1,129 @@
+# Render Blueprint — describes all three services as code.
+#
+# Deploy via Render dashboard → New → Blueprint → connect this repo → Apply.
+# Render will read this file and provision all three services.
+#
+# Secrets are NOT in this file. After the blueprint applies, set every
+# `sync: false` variable in each service's "Environment" tab. See
+# docs/DEPLOY.md for the exact list.
+
+services:
+  # ── API ─────────────────────────────────────────────────────────────
+  - type: web
+    name: mwc-api
+    runtime: docker
+    region: singapore # closest to India
+    plan: starter
+    dockerfilePath: apps/api/Dockerfile
+    dockerContext: . # repo root (Dockerfile copies from apps/api/)
+    branch: main
+    healthCheckPath: /api/v1/health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "8000"
+      - key: ANTHROPIC_COMPANION_MODEL
+        value: claude-sonnet-4-6
+      - key: ANTHROPIC_HAIKU_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      - key: DAILY_TEXT_MSG_CAP
+        value: "50"
+      - key: DAILY_VOICE_SECONDS_CAP
+        value: "600"
+      - key: PER_CALL_MAX_SECONDS
+        value: "300"
+      - key: DAILY_VOICE_MINUTES_GLOBAL
+        value: "500"
+      - key: DAILY_COST_CEILING_USD
+        value: "20.0"
+      # Secrets — fill in via Render dashboard, not in this file:
+      - key: DATABASE_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: VOICE_WORKER_SECRET
+        sync: false
+      - key: CORS_ALLOWED_ORIGINS
+        sync: false # e.g. https://wellbeing.adityeah.ai
+
+  # ── Voice Worker ────────────────────────────────────────────────────
+  - type: worker
+    name: mwc-voice-worker
+    runtime: docker
+    region: singapore
+    plan: starter
+    dockerfilePath: apps/voice-worker/Dockerfile
+    dockerContext: .
+    branch: main
+    autoDeploy: true
+    envVars:
+      - key: ANTHROPIC_COMPANION_MODEL
+        value: claude-sonnet-4-6
+      - key: ANTHROPIC_HAIKU_MODEL
+        value: claude-haiku-4-5-20251001
+      - key: SUPABASE_JWT_AUDIENCE
+        value: authenticated
+      # Voice worker imports from app.* so needs DB + API + Anthropic + STT/TTS:
+      - key: DATABASE_URL
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_JWKS_URL
+        sync: false
+      - key: LIVEKIT_URL
+        sync: false
+      - key: LIVEKIT_API_KEY
+        sync: false
+      - key: LIVEKIT_API_SECRET
+        sync: false
+      - key: DEEPGRAM_API_KEY
+        sync: false
+      - key: CARTESIA_API_KEY
+        sync: false
+      - key: VOICE_WORKER_SECRET
+        sync: false
+      - key: API_BASE_URL
+        sync: false # https://mwc-api.onrender.com (or your custom api domain)
+
+  # ── Web (Next.js) ───────────────────────────────────────────────────
+  - type: web
+    name: mwc-web
+    runtime: docker
+    region: singapore
+    plan: starter
+    dockerfilePath: apps/web/Dockerfile
+    dockerContext: .
+    branch: main
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: "3000"
+      - key: NODE_ENV
+        value: production
+      # NEXT_PUBLIC_* are baked into the client bundle at build time —
+      # set them in Render so they're available as Docker build args.
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false
+      - key: NEXT_PUBLIC_SUPABASE_ANON_KEY
+        sync: false
+      - key: NEXT_PUBLIC_API_URL
+        sync: false # https://mwc-api.onrender.com (or custom api domain)
