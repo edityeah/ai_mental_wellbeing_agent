@@ -42,4 +42,5 @@ async def me(
         daily_text_msg_cap=settings.daily_text_msg_cap,
         voice_seconds_used_today=usage.voice_seconds,
         voice_seconds_cap=settings.daily_voice_seconds_cap,
+        onboarded_at=user.onboarded_at,
     )

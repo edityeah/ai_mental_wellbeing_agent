@@ -4,6 +4,10 @@ import type {
   InsightsOut,
   MeOut,
   MessageOut,
+  MoodOut,
+  OnboardingIn,
+  ProfileOut,
+  ProfileUpdateIn,
 } from "@/lib/api/types";
 
 const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
@@ -61,6 +65,23 @@ export const api = {
   listMessages: (id: string) =>
     jsonRequest<MessageOut[]>(`/conversations/${id}/messages`),
   insights: () => jsonRequest<InsightsOut>("/insights"),
+  completeOnboarding: (body: OnboardingIn) =>
+    jsonRequest<{ ok: boolean }>("/onboarding", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  getProfile: () => jsonRequest<ProfileOut>("/profile"),
+  updateProfile: (body: ProfileUpdateIn) =>
+    jsonRequest<ProfileOut>("/profile", {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  getMoodToday: () => jsonRequest<MoodOut | null>("/mood/today"),
+  upsertMood: (score: number, note?: string) =>
+    jsonRequest<MoodOut>("/mood", {
+      method: "POST",
+      body: JSON.stringify({ score, note: note ?? null }),
+    }),
 };
 
 export { BASE as API_BASE };

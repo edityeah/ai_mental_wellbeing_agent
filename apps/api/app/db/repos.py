@@ -76,6 +76,7 @@ async def append_message(
     source: str,
     risk_level: str | None,
     token_count: int,
+    attachments: list[dict] | None = None,
 ) -> Message:
     msg = Message(
         conversation_id=conversation_id,
@@ -84,6 +85,7 @@ async def append_message(
         source=source,
         risk_level=risk_level,
         token_count=token_count,
+        attachments=attachments,
     )
     session.add(msg)
     await session.flush()

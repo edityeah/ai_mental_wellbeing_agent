@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agents import (
@@ -15,6 +16,7 @@ from app.agents import (
     safety,
     title as title_gen,
 )
+from app.db.models import MoodCheckin
 from app.agents.safety import HistoryTurn
 from app.crisis.card import CRISIS_CARD_TEXT
 from app.db import repos
@@ -38,17 +40,83 @@ class StreamFooter:
     total_tokens: int
 
 
+def _data_url_to_claude_image_block(data_url: str) -> dict | None:
+    """Convert a 'data:image/png;base64,XXXX' URL into Claude's image
+    content block shape. Returns None for malformed input."""
+    try:
+        if not data_url.startswith("data:"):
+            return None
+        header, _, payload = data_url.partition(",")
+        # header is "data:image/png;base64"
+        meta = header[5:]  # drop "data:"
+        if ";base64" not in meta:
+            return None
+        mime = meta.split(";")[0]
+        if mime not in {"image/png", "image/jpeg", "image/webp", "image/gif"}:
+            return None
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": mime,
+                "data": payload,
+            },
+        }
+    except Exception:
+        return None
+
+
 async def _load_history(
     session: AsyncSession, *, conversation_id: uuid.UUID, max_turns: int = 30
 ) -> list[HistoryTurn]:
+    """Build Claude messages from DB rows. User messages with image
+    attachments become multi-part content (image blocks + text block)
+    so Claude can actually "see" what was shared."""
     msgs = await repos.list_messages(
         session, conversation_id=conversation_id, limit=max_turns
     )
     out: list[HistoryTurn] = []
     for m in msgs:
-        if m.role in ("user", "assistant"):
+        if m.role not in ("user", "assistant"):
+            continue
+        attachments = m.attachments or []
+        image_blocks: list[dict] = []
+        if m.role == "user" and attachments:
+            for a in attachments:
+                if isinstance(a, dict) and a.get("kind") == "image":
+                    block = _data_url_to_claude_image_block(
+                        a.get("data_url") or ""
+                    )
+                    if block:
+                        image_blocks.append(block)
+        if image_blocks:
+            # Multi-part content: images first, then the user's text.
+            content_blocks: list[dict] = list(image_blocks)
+            if m.content:
+                content_blocks.append({"type": "text", "text": m.content})
+            out.append({"role": m.role, "content": content_blocks})  # type: ignore[arg-type]
+        else:
             out.append({"role": m.role, "content": m.content})  # type: ignore[arg-type]
     return out
+
+
+async def _load_mood_today(
+    session: AsyncSession, *, user_id: uuid.UUID
+) -> dict | None:
+    """Today's mood check-in for the user, if they submitted one. Used to
+    calibrate the Companion's tone — slower for 1-2, lighter for 4-5."""
+    today = datetime.now(tz=timezone.utc).date()
+    row = (
+        await session.execute(
+            select(MoodCheckin).where(
+                MoodCheckin.user_id == user_id,
+                MoodCheckin.date == today,
+            )
+        )
+    ).scalar_one_or_none()
+    if row is None:
+        return None
+    return {"score": row.score, "note": row.note}
 
 
 async def run_chat_turn(
@@ -57,6 +125,7 @@ async def run_chat_turn(
     user_id: uuid.UUID,
     conversation_id: uuid.UUID,
     user_text: str,
+    attachments: list[dict] | None = None,
 ) -> AsyncIterator[StreamHeader | str | StreamFooter]:
     """Drive a single chat turn — sequential, reliable.
 
@@ -82,7 +151,9 @@ async def run_chat_turn(
         session, user_id=user_id, today=today, cap=settings.daily_text_msg_cap
     )
 
-    # Persist user message
+    # Persist user message (including any image attachments — base64 data
+    # URLs stored in JSONB so we can re-render them on later loads and
+    # pass them to Claude vision for follow-up turns).
     user_msg = await repos.append_message(
         session,
         conversation_id=conversation_id,
@@ -91,12 +162,14 @@ async def run_chat_turn(
         source="text",
         risk_level=None,
         token_count=max(1, len(user_text) // 4),
+        attachments=attachments or None,
     )
     await session.commit()
 
-    # Build history + load profile
+    # Build history + load profile + today's mood reading (if any)
     history = await _load_history(session, conversation_id=conversation_id)
     profile_row = await repos.get_or_create_profile(session, user_id=user_id)
+    mood_today = await _load_mood_today(session, user_id=user_id)
     await session.commit()
 
     # Safety classifier (sequential — wait for result)
@@ -149,6 +222,7 @@ async def run_chat_turn(
             source="text",
             profile=profile_row.profile,
             summary=profile_row.summary,
+            mood_today=mood_today,
         ):
             collected.append(chunk)
             yield chunk
@@ -183,7 +257,7 @@ async def maybe_run_profile_updater(
     *,
     user_id: uuid.UUID,
     conversation_id: uuid.UUID,
-    every_n_assistant_replies: int = 5,
+    every_n_assistant_replies: int = 2,
 ) -> None:
     """Run the profile updater if there have been enough new assistant replies
     since the watermark. Safe to call after every chat turn."""

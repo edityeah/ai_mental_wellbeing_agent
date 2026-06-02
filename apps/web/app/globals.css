@@ -24,3 +24,58 @@ body {
 .h-screen-dvh {
   height: 100dvh;
 }
+
+/* ── Care Plan print stylesheet ──────────────────────────────────────────
+ *
+ * When the user clicks "Save as PDF" on a Care Plan card, we set
+ * [data-printing="1"] on that specific card, then call window.print().
+ * The browser's native print dialog gives them a "Save as PDF" option.
+ *
+ * The rules below:
+ *   • Hide everything in the document by default during print.
+ *   • Re-show only the targeted Care Plan card + its ancestors.
+ *   • Override colors so gradients/borders look right on white paper.
+ *   • Lay out the card to fit one letter/A4 page.
+ */
+@media print {
+  /* Hide everything by default */
+  body * {
+    visibility: hidden;
+  }
+  /* Show the targeted card and everything inside it */
+  [data-care-plan][data-printing="1"],
+  [data-care-plan][data-printing="1"] * {
+    visibility: visible;
+  }
+  /* Reveal the print-only footer inside the targeted card */
+  [data-care-plan][data-printing="1"] .care-plan-print-only {
+    display: block !important;
+  }
+  /* Hide interactive bits inside the card (the Save button itself) */
+  [data-care-plan][data-printing="1"] .care-plan-no-print {
+    display: none !important;
+  }
+  /* Pull the card out of the chat layout and pin to top-left of page */
+  [data-care-plan][data-printing="1"] {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    max-width: none !important;
+    box-shadow: none !important;
+    border: 1px solid #cfd5cb !important;
+    border-radius: 12px !important;
+    page-break-inside: avoid;
+  }
+  /* Make sure ancestor flex/overflow rules don't crop the card */
+  [data-care-plan][data-printing="1"]
+    ~ *,
+  body > * {
+    overflow: visible !important;
+  }
+  /* Tighten the body padding for print so the card fills the page well */
+  @page {
+    margin: 14mm;
+    size: A4;
+  }
+}

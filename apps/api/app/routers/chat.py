@@ -35,9 +35,14 @@ async def _sse_events(
     user_id,
     conversation_id,
     content: str,
+    attachments: list[dict] | None = None,
 ) -> AsyncIterator[dict]:
     async for event in run_chat_turn(
-        session, user_id=user_id, conversation_id=conversation_id, user_text=content
+        session,
+        user_id=user_id,
+        conversation_id=conversation_id,
+        user_text=content,
+        attachments=attachments,
     ):
         if isinstance(event, StreamHeader):
             yield {
@@ -125,6 +130,10 @@ async def chat(
                 user_id=claims.user_id,
                 conversation_id=body.conversation_id,
                 content=body.content,
+                attachments=(
+                    [a.model_dump() for a in (body.attachments or [])]
+                    or None
+                ),
             ):
                 yield ev
         except LookupError:

@@ -16,7 +16,12 @@ What's already working for you
 <the strengths, resources, and coping behaviors you noticed — only if they were mentioned. Skip the whole section if none.>
 
 A few small things to try
-<1 to 3 short, concrete, named experiments tied to what they shared. One sentence each. Frame as "you could try…", not "you should." Skip the section entirely if you don't have enough to suggest something genuine.>
+<1 to 3 short, concrete, named experiments tied to what they shared. Each one on its OWN LINE, separated by a blank line. One short sentence each, max two. Frame as "you could try…", not "you should." Optionally a tiny parenthetical reason after. Skip the section entirely if you don't have enough to suggest something genuine.
+
+Example (use this exact line shape):
+You could try talking to your friend tonight — sometimes just saying it out loud helps.
+
+You could spend five minutes before bed writing what's on your mind on paper, to clear your head for sleep.>
 
 When to check back in
 <a single short sentence — when or under what condition it would be good to revisit. Optional.>

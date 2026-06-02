@@ -180,6 +180,30 @@ async def _load_profile(user_id: uuid.UUID) -> tuple[dict, str]:
         return row.profile, row.summary
 
 
+async def _load_mood_today(user_id: uuid.UUID) -> dict | None:
+    """Pull today's mood check-in if the user submitted one. Voice
+    matches the text-chat flow so the Companion's tone is calibrated
+    the same way across both modes."""
+    from datetime import datetime, timezone
+    from sqlalchemy import select
+    from app.db.models import MoodCheckin
+
+    sm = get_sessionmaker()
+    async with sm() as session:
+        today = datetime.now(tz=timezone.utc).date()
+        row = (
+            await session.execute(
+                select(MoodCheckin).where(
+                    MoodCheckin.user_id == user_id,
+                    MoodCheckin.date == today,
+                )
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return None
+        return {"score": row.score, "note": row.note}
+
+
 async def _persist_turn(
     *,
     conversation_id: uuid.UUID,
@@ -302,12 +326,21 @@ class CompanionLLMStream(LLMStream):
         profile_task: asyncio.Task = asyncio.create_task(
             _load_profile(self._user_id)
         )
+        mood_task: asyncio.Task = asyncio.create_task(
+            _load_mood_today(self._user_id)
+        )
 
         try:
             profile, summary = await profile_task
         except Exception as e:
             logger.warning("load_profile_failed: %s", e)
             profile, summary = {}, ""
+
+        try:
+            mood_today = await mood_task
+        except Exception as e:
+            logger.warning("load_mood_failed: %s", e)
+            mood_today = None
 
         history_with_user = history + [{"role": "user", "content": user_text}]
         chunk_id = uuid.uuid4().hex
@@ -355,6 +388,7 @@ class CompanionLLMStream(LLMStream):
                 source="voice",
                 profile=profile,
                 summary=summary,
+                mood_today=mood_today,
             ):
                 if not piece:
                     continue

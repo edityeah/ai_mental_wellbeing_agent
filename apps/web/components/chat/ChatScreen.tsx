@@ -1,20 +1,27 @@
 "use client";
 
+/**
+ * Chat canvas. ONLY the middle pane — header + messages + composer +
+ * voice call panel. The sidebar (threads + user menu) lives in the
+ * parent (app) layout via AppShell, so it persists across route changes
+ * to /profile, /insights, /legal/*, etc.
+ *
+ * Sidebar↔canvas communication is via URL navigation; this component
+ * doesn't know about other conversations beyond the one in the URL.
+ */
+
 import { Composer } from "@/components/chat/Composer";
-import { ConfirmDeleteDialog } from "@/components/chat/ConfirmDeleteDialog";
 import { Header } from "@/components/chat/Header";
 import { MessageList } from "@/components/chat/MessageList";
 import { OfflineBanner } from "@/components/chat/OfflineBanner";
 import { QuotaFooter } from "@/components/chat/QuotaFooter";
-import { RenameDialog } from "@/components/chat/RenameDialog";
-import { ThreadList } from "@/components/threads/ThreadList";
-import { ThreadsDrawer } from "@/components/threads/ThreadsDrawer";
 import { CallScreen } from "@/components/voice/CallScreen";
+import { useAppShell } from "@/components/shell/AppShell";
 import { api } from "@/lib/api/client";
 import { streamChat } from "@/lib/api/sse";
 import type {
-  ConversationOut,
   MeOut,
+  MessageAttachment,
   MessageOut,
 } from "@/lib/api/types";
 import type { Route } from "next";
@@ -23,11 +30,11 @@ import { useEffect, useRef, useState } from "react";
 
 export function ChatScreen({ initialId }: { initialId: string | null }) {
   const router = useRouter();
+  const { openDrawer } = useAppShell();
 
   const [me, setMe] = useState<MeOut | null>(null);
-  const [conversations, setConversations] = useState<ConversationOut[]>([]);
   const [activeId, setActiveId] = useState<string | null>(initialId);
-  const [activeConv, setActiveConv] = useState<ConversationOut | null>(null);
+  const [activeTitle, setActiveTitle] = useState<string>("Wellbeing");
   const [messages, setMessages] = useState<MessageOut[]>([]);
 
   // What's currently being streamed (null = no stream in flight).
@@ -35,76 +42,79 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
   // Non-empty = render as a normal bubble that grows.
   const [streamingText, setStreamingText] = useState<string | null>(null);
 
-  const [drawerOpen, setDrawerOpen] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [callOpen, setCallOpen] = useState(false);
 
-  // In-app dialogs (replaces window.prompt / window.confirm)
-  const [renameTarget, setRenameTarget] = useState<{
-    id: string;
-    title: string;
-  } | null>(null);
-  const [deleteTarget, setDeleteTarget] = useState<{
-    id: string;
-    title: string;
-  } | null>(null);
-
-  // Bootstrap: load conversations + me; pick latest if no active id.
-  // We DO NOT auto-create a conversation here — that produced duplicates if
-  // the effect ran twice. First send creates the conversation lazily.
+  // Bootstrap: load `me`. If new user not yet onboarded, send them to
+  // /onboarding. Sidebar handles its own conversation list independently.
   const bootstrapped = useRef(false);
   useEffect(() => {
     if (bootstrapped.current) return;
     bootstrapped.current = true;
     (async () => {
-      const [meRes, convs] = await Promise.all([
-        api.me(),
-        api.listConversations(),
-      ]);
+      const meRes = await api.me();
+      if (!meRes.onboarded_at) {
+        router.replace("/onboarding" as Route);
+        return;
+      }
       setMe(meRes);
-      setConversations(convs);
-      if (!activeId && convs.length > 0) {
-        const id = convs[0].id;
-        router.replace(`/chat/${id}` as Route);
-        setActiveId(id);
+      // If we landed on /chat with no id and there are existing
+      // conversations, jump into the latest one.
+      if (!initialId) {
+        try {
+          const convs = await api.listConversations();
+          if (convs.length > 0) {
+            router.replace(`/chat/${convs[0].id}` as Route);
+          }
+        } catch {
+          /* not critical — sidebar will surface convs */
+        }
       }
     })().catch(console.error);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Single-flight guard so rapid clicks on "+ New conversation" don't
-  // create two empty rows.
-  const creatingConv = useRef(false);
-
-  // Load messages when active conversation changes.
+  // Load messages + title whenever the active id changes (driven by URL).
   useEffect(() => {
-    if (!activeId) return;
+    if (!activeId) {
+      setMessages([]);
+      setActiveTitle("Wellbeing");
+      return;
+    }
     (async () => {
-      const c = conversations.find((c) => c.id === activeId) || null;
-      setActiveConv(c);
-      const msgs = await api.listMessages(activeId);
+      const [msgs, convs] = await Promise.all([
+        api.listMessages(activeId),
+        api.listConversations(),
+      ]);
       setMessages(msgs);
+      const conv = convs.find((c) => c.id === activeId);
+      setActiveTitle(conv?.title || "New conversation");
       setStreamingText(null);
       setSendError(null);
     })().catch(console.error);
-  }, [activeId, conversations]);
+  }, [activeId]);
 
-  async function handleSend(text: string) {
-    // Lazy-create the first conversation on the user's first message.
+  // Single-flight guard so rapid sends don't double-create conversations.
+  const creatingConv = useRef(false);
+
+  async function handleSend(
+    text: string,
+    attachments?: MessageAttachment[],
+  ) {
     let convId = activeId;
+    // Lazily create a conversation on first send if we're on bare /chat.
     if (!convId) {
       if (creatingConv.current) return;
       creatingConv.current = true;
       try {
         const c = await api.createConversation();
-        setConversations((prev) => [c, ...prev]);
+        convId = c.id;
         setActiveId(c.id);
         router.replace(`/chat/${c.id}` as Route);
-        convId = c.id;
       } catch {
+        setSendError("Couldn't start a new conversation. Try again.");
         creatingConv.current = false;
-        setSendError("Couldn't start a conversation. Try again.");
         return;
       }
       creatingConv.current = false;
@@ -112,7 +122,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
     setSending(true);
     setSendError(null);
 
-    // Optimistic user message
+    // Optimistic user message — include attachments so the image shows
+    // immediately while the assistant is still thinking.
     const tempId = `tmp-${Date.now()}`;
     setMessages((prev) => [
       ...prev,
@@ -123,6 +134,7 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         content: text,
         risk_level: null,
         created_at: new Date().toISOString(),
+        attachments: attachments ?? null,
       },
     ]);
 
@@ -142,12 +154,12 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
       errored: false,
     };
 
-    // --- Producer: consume SSE, push deltas into state.buffer ---
     const producer = (async () => {
       try {
         for await (const ev of streamChat({
-          conversationId: convId,
+          conversationId: convId!,
           content: text,
+          attachments,
         })) {
           if (ev.type === "started") {
             state.assistantMsgId = ev.message_id;
@@ -161,9 +173,11 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
             state.errored = true;
             state.streamDone = true;
             if (ev.error === "daily_cap_reached") {
-              setSendError("You've reached today's limit — see you tomorrow.");
+              setSendError(
+                "You've reached today's limit — see you tomorrow.",
+              );
             } else {
-              setSendError("Something's off. Try again in a moment.");
+              setSendError("Couldn't send. Try again.");
             }
             return;
           }
@@ -171,201 +185,105 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
       } catch {
         state.errored = true;
         state.streamDone = true;
-        setSendError("No connection. Your message wasn't sent.");
-      } finally {
-        state.streamDone = true;
+        setSendError("Network blip. Try again.");
       }
     })();
 
-    // --- Consumer: reveal at a fixed cadence so it feels like typing ---
-    // One character per tick, always. ~33ms ≈ 30 chars/sec — feels like
-    // someone is actually typing. The buffer can race ahead of us; that's
-    // fine, we just keep stepping at the human pace.
-    // ~40 chars/sec — feels like a real person typing.
+    // Typewriter renderer
     const tickMs = 25;
-    const sleep = (ms: number) =>
-      new Promise<void>((r) => setTimeout(r, ms));
-
-    while (!state.streamDone || state.displayed.length < state.buffer.length) {
-      if (state.displayed.length < state.buffer.length) {
-        state.displayed = state.buffer.slice(0, state.displayed.length + 1);
+    while (true) {
+      await new Promise((r) => setTimeout(r, tickMs));
+      if (state.errored) break;
+      const advance = Math.min(
+        state.buffer.length - state.displayed.length,
+        3,
+      );
+      if (advance > 0) {
+        state.displayed = state.buffer.slice(
+          0,
+          state.displayed.length + advance,
+        );
         setStreamingText(state.displayed);
       }
-      await sleep(tickMs);
-      if (state.errored) break;
+      if (state.streamDone && state.displayed.length >= state.buffer.length) {
+        break;
+      }
     }
+    await producer;
 
-    await producer; // ensure the SSE consumer fully resolved
-
-    // Commit the assistant message (unless we errored mid-stream).
-    if (!state.errored && state.displayed.length > 0 && state.assistantMsgId) {
-      const finalText = state.displayed;
-      const msgId = state.assistantMsgId;
-      const crisis = state.isCrisis;
-      setMessages((prev) => {
-        if (prev.some((m) => m.id === msgId)) return prev;
-        return [
-          ...prev,
-          {
-            id: msgId,
-            role: crisis ? "system_crisis" : "assistant",
-            source: "text",
-            content: finalText,
-            risk_level: null,
-            created_at: new Date().toISOString(),
-          },
-        ];
-      });
-    }
+    // Finalize: drop streaming bubble, append the real assistant row.
+    const finalText = state.buffer;
     setStreamingText(null);
-    setSending(false);
-
-    // Refresh /me + conversations (for the auto-generated title)
-    if (!state.errored) {
+    if (!state.errored && state.assistantMsgId && finalText.length > 0) {
+      setMessages((prev) => {
+        // Replace tmp- user id with a real-looking one (visual only;
+        // refetch on next nav fixes it). Also append the assistant row.
+        const next = prev.filter((m) => m.id !== tempId);
+        next.push({
+          id: tempId,
+          role: "user",
+          source: "text",
+          content: text,
+          risk_level: null,
+          created_at: new Date().toISOString(),
+          attachments: attachments ?? null,
+        });
+        next.push({
+          id: state.assistantMsgId!,
+          role: state.isCrisis ? "system_crisis" : "assistant",
+          source: "text",
+          content: finalText,
+          risk_level: null,
+          created_at: new Date().toISOString(),
+        });
+        return next;
+      });
+      // Refresh `me` so quota footer updates.
       try {
         setMe(await api.me());
-        const convs = await api.listConversations();
-        setConversations(convs);
       } catch {
-        /* non-critical refresh */
+        /* non-critical */
       }
     }
+    setSending(false);
   }
 
-  async function handleNewConversation() {
-    if (creatingConv.current) return; // single-flight guard
-    creatingConv.current = true;
-    try {
-      const c = await api.createConversation();
-      setConversations((prev) => [c, ...prev]);
-      setActiveId(c.id);
-      setDrawerOpen(false);
-      router.replace(`/chat/${c.id}` as Route);
-    } finally {
-      creatingConv.current = false;
-    }
-  }
-
-  function requestRenameConversation(id: string, currentTitle: string) {
-    setRenameTarget({ id, title: currentTitle });
-  }
-
-  async function commitRename(newTitle: string) {
-    if (!renameTarget) return;
-    const id = renameTarget.id;
-    try {
-      const updated = await api.renameConversation(id, newTitle);
-      setConversations((prev) =>
-        prev.map((c) => (c.id === id ? { ...c, title: updated.title } : c)),
-      );
-      if (id === activeId) {
-        setActiveConv((c) => (c ? { ...c, title: updated.title } : c));
-      }
-      setRenameTarget(null);
-    } catch {
-      setSendError("Couldn't rename. Try again.");
-      setRenameTarget(null);
-    }
-  }
-
-  function requestDeleteConversation(id: string, title: string) {
-    setDeleteTarget({ id, title });
-  }
-
-  async function commitDelete() {
-    if (!deleteTarget) return;
-    const id = deleteTarget.id;
-    try {
-      await api.deleteConversation(id);
-      const remaining = conversations.filter((c) => c.id !== id);
-      setConversations(remaining);
-      if (id === activeId) {
-        if (remaining.length > 0) {
-          const next = remaining[0].id;
-          setActiveId(next);
-          router.replace(`/chat/${next}` as Route);
-        } else {
-          setActiveId(null);
-          setActiveConv(null);
-          setMessages([]);
-          router.replace("/chat");
-        }
-      }
-      setDeleteTarget(null);
-    } catch {
-      setSendError("Couldn't delete. Try again.");
-      setDeleteTarget(null);
-    }
-  }
-
-  const capReached = me ? me.today_text_msg_count >= me.daily_text_msg_cap : false;
+  const capReached = me
+    ? me.today_text_msg_count >= me.daily_text_msg_cap
+    : false;
   const voiceCapReached = me
     ? me.voice_seconds_used_today >= me.voice_seconds_cap
     : false;
 
   return (
     <>
-      <ThreadsDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)}>
-        <ThreadList
-          items={conversations}
-          activeId={activeId}
-          onPick={(id) => {
-            setActiveId(id);
-            setDrawerOpen(false);
-            router.replace(`/chat/${id}` as Route);
-          }}
-          onNew={handleNewConversation}
-          onRename={requestRenameConversation}
-          onDelete={requestDeleteConversation}
-        />
-      </ThreadsDrawer>
-
-      <main className="flex-1 flex flex-col h-screen-dvh min-w-0">
-        <Header
-          title={activeConv?.title || "Wellbeing"}
-          onOpenDrawer={() => setDrawerOpen(true)}
-          onCallClick={() => {
-            if (activeId && !voiceCapReached) setCallOpen(true);
-          }}
-          callDisabled={!activeId || voiceCapReached}
-        />
-        <OfflineBanner />
-        <MessageList
-          messages={messages}
-          streamingText={streamingText}
-        />
-        {me && (
-          <QuotaFooter
-            used={me.today_text_msg_count}
-            cap={me.daily_text_msg_cap}
-            voiceUsedSeconds={me.voice_seconds_used_today}
-            voiceCapSeconds={me.voice_seconds_cap}
-          />
-        )}
-        <Composer
-          disabled={capReached || sending}
-          disabledReason={
-            sendError ||
-            (capReached
-              ? "You've reached today's limit — see you tomorrow."
-              : undefined)
-          }
-          onSend={handleSend}
-        />
-      </main>
-
-      <RenameDialog
-        open={renameTarget !== null}
-        initialTitle={renameTarget?.title ?? ""}
-        onCancel={() => setRenameTarget(null)}
-        onSubmit={commitRename}
+      <Header
+        title={activeTitle}
+        onOpenDrawer={openDrawer}
+        onCallClick={() => {
+          if (activeId && !voiceCapReached) setCallOpen(true);
+        }}
+        callDisabled={!activeId || voiceCapReached}
       />
-
-      <ConfirmDeleteDialog
-        open={deleteTarget !== null}
-        title={deleteTarget?.title ?? ""}
-        onCancel={() => setDeleteTarget(null)}
-        onConfirm={commitDelete}
+      <OfflineBanner />
+      <MessageList messages={messages} streamingText={streamingText} />
+      {me && (
+        <QuotaFooter
+          used={me.today_text_msg_count}
+          cap={me.daily_text_msg_cap}
+          voiceUsedSeconds={me.voice_seconds_used_today}
+          voiceCapSeconds={me.voice_seconds_cap}
+        />
+      )}
+      <Composer
+        disabled={capReached || sending}
+        disabledReason={
+          sendError ||
+          (capReached
+            ? "You've reached today's limit — see you tomorrow."
+            : undefined)
+        }
+        onSend={handleSend}
       />
 
       <CallScreen
@@ -373,17 +291,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         conversationId={activeId}
         onClose={() => setCallOpen(false)}
         onLiveTranscript={(t) => {
-          // Three packet kinds from the voice worker:
-          //   • final  → append a whole bubble (user STT, crisis cards)
-          //   • delta  → append a chunk to an in-progress assistant bubble
-          //              (creates the bubble on first delta), giving the
-          //              same typewriter feel the text chat has
-          //   • end    → bubble is complete, replace its content with the
-          //              canonical final text (covers any dropped deltas)
           setMessages((prev) => {
             if (t.kind === "final") {
-              // Skip if it's already the last bubble (race between
-              // delta-end and a refetch).
               const last = prev[prev.length - 1];
               if (
                 last &&
@@ -394,7 +303,9 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
               }
               const id = t.id
                 ? `live-${t.id}`
-                : `live-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+                : `live-${Date.now()}-${Math.random()
+                    .toString(36)
+                    .slice(2, 8)}`;
               return [
                 ...prev,
                 {
@@ -413,7 +324,6 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
 
             if (t.kind === "delta") {
               if (idx === -1) {
-                // First delta — create the bubble.
                 return [
                   ...prev,
                   {
@@ -426,7 +336,6 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
                   },
                 ];
               }
-              // Append delta to existing bubble.
               const next = prev.slice();
               next[idx] = {
                 ...next[idx],
@@ -435,10 +344,8 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
               return next;
             }
 
-            // kind === "end" — replace content with the canonical final text.
+            // kind === "end"
             if (idx === -1) {
-              // Never saw a delta (rare — entire response fit in pre-flush
-              // safety buffer). Append the final as a fresh bubble.
               return [
                 ...prev,
                 {

@@ -129,6 +129,7 @@ async def list_messages(
             content=m.content,
             risk_level=m.risk_level,  # type: ignore[arg-type]
             created_at=m.created_at,
+            attachments=m.attachments,
         )
         for m in msgs
     ]

@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import type { MessageOut } from "@/lib/api/types";
 import { CrisisCard } from "./CrisisCard";
 import { MessageBubble } from "./MessageBubble";
+import { MoodCheckin } from "./MoodCheckin";
 import { RecapCard } from "./RecapCard";
 
 function TypingBubble() {
@@ -20,9 +21,11 @@ function TypingBubble() {
 
 function EmptyState() {
   return (
-    <div className="flex-1 flex items-center justify-center px-6 py-12 text-center">
-      <div className="max-w-md">
-        <div className="text-4xl mb-4">🍃</div>
+    <div className="flex-1 flex flex-col items-center justify-center px-6 py-12">
+      <div className="w-full">
+        <MoodCheckin />
+      </div>
+      <div className="max-w-md text-center">
         <h2 className="font-serif text-xl text-sage mb-2">
           I&apos;m here to be a steady presence.
         </h2>
@@ -74,7 +77,14 @@ export function MessageList({
         if (m.role === "system_recap") {
           return <RecapCard key={m.id} content={m.content} />;
         }
-        return <MessageBubble key={m.id} role={m.role} content={m.content} />;
+        return (
+          <MessageBubble
+            key={m.id}
+            role={m.role}
+            content={m.content}
+            attachments={m.attachments}
+          />
+        );
       })}
       {showStreamingBubble && (
         <MessageBubble role="assistant" content={streamingText!} />

@@ -1,10 +1,11 @@
 import { API_BASE } from "@/lib/api/client";
 import { createSupabaseBrowserClient } from "@/lib/supabase/client";
-import type { SseEvent } from "@/lib/api/types";
+import type { MessageAttachment, SseEvent } from "@/lib/api/types";
 
 export async function* streamChat(args: {
   conversationId: string;
   content: string;
+  attachments?: MessageAttachment[];
 }): AsyncIterable<SseEvent> {
   const supabase = createSupabaseBrowserClient();
   const { data } = await supabase.auth.getSession();
@@ -24,6 +25,7 @@ export async function* streamChat(args: {
     body: JSON.stringify({
       conversation_id: args.conversationId,
       content: args.content,
+      attachments: args.attachments?.length ? args.attachments : undefined,
     }),
   });
 

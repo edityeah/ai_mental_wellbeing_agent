@@ -53,6 +53,11 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+    # Set once the user finishes the /onboarding flow. NULL means they
+    # haven't been through it yet — middleware redirects them there.
+    onboarded_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class Conversation(Base):
@@ -101,6 +106,12 @@ class Message(Base):
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     token_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Optional list of attachments the user uploaded with this message.
+    # Each entry: {kind: "image", mime: "image/png", data_url: "data:...;base64,...", name: "..."}
+    # Stored as JSONB so we can grow the shape without a migration.
+    attachments: Mapped[list[dict] | None] = mapped_column(
+        "attachments", JSONB, nullable=True
+    )
 
     conversation: Mapped[Conversation] = relationship(back_populates="messages")
 
@@ -191,3 +202,33 @@ class UsageDaily(Base):
     voice_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tokens_in: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     tokens_out: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+
+
+class MoodCheckin(Base):
+    """A single mood reading from the user, one per day max (composite PK).
+
+    Surfaced as a widget when they first open the app on a given day.
+    The Companion reads the most recent reading before each turn so it
+    can adjust tone (e.g. "I see you marked yourself at 2/5 today — let's
+    take it slow.")
+    """
+
+    __tablename__ = "mood_checkins"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    date: Mapped[date] = mapped_column(Date, primary_key=True)
+    # 1 = roughest, 5 = best. Five-point emoji scale on the frontend.
+    score: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Optional one-line freeform context.
+    note: Mapped[str | None] = mapped_column(String(280), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        CheckConstraint("score BETWEEN 1 AND 5", name="ck_mood_score_range"),
+    )

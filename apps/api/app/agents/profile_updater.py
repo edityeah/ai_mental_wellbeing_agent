@@ -64,12 +64,30 @@ async def update_profile(
         logger.warning("profile_updater_error", exc_info=e)
         return None
 
+    # Haiku occasionally wraps JSON in markdown code fences (```json ... ```)
+    # despite the system prompt saying "no markdown" — strip them defensively.
+    # Same pattern we hit on the safety classifier.
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        # Drop the opening fence (with or without language tag) and the
+        # closing fence.
+        lines = cleaned.split("\n")
+        if lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        cleaned = "\n".join(lines).strip()
+
     try:
-        parsed = json.loads(text)
+        parsed = json.loads(cleaned)
         profile_obj = Profile.model_validate(parsed.get("profile") or {})
         summary = str(parsed.get("summary", "")).strip()
     except Exception as e:
-        logger.warning("profile_updater_parse_failed text=%r exc=%s", text, e)
+        logger.warning(
+            "profile_updater_parse_failed text=%r exc=%s",
+            cleaned[:200],
+            e,
+        )
         return None
 
     return ProfileUpdate(
