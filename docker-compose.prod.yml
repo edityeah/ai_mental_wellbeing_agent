@@ -1,0 +1,128 @@
+# Production deployment — single VM, Docker Compose.
+#
+# Usage (on the VM):
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Caddy fronts everything: visitors hit it on 80/443, it terminates TLS
+# (auto-renewing Let's Encrypt certs), and reverse-proxies to the right
+# container by hostname. Web and API never expose ports to the public
+# internet directly.
+#
+# Secrets come from .env (NOT committed). See .env.production.example
+# for the template.
+
+services:
+  # ── Reverse proxy + TLS ────────────────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp" # HTTP/3 (QUIC)
+    volumes:
+      - ./infra/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - web
+      - api
+    networks:
+      - mwc
+
+  # ── Web (Next.js 15) ───────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        # NEXT_PUBLIC_* are baked into the client bundle at build time.
+        # Read from the host env file so a redeploy without code change
+        # still picks up new values if you edit .env and rebuild.
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL}
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: ${NEXT_PUBLIC_SUPABASE_ANON_KEY}
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    expose:
+      - "3000" # internal-only; Caddy reaches it via the docker network
+    environment:
+      NODE_ENV: production
+      PORT: "3000"
+    networks:
+      - mwc
+
+  # ── API (FastAPI) ──────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    expose:
+      - "8000"
+    environment:
+      PORT: "8000"
+      DATABASE_URL: ${DATABASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_COMPANION_MODEL: ${ANTHROPIC_COMPANION_MODEL}
+      ANTHROPIC_HAIKU_MODEL: ${ANTHROPIC_HAIKU_MODEL}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_JWT_AUDIENCE: ${SUPABASE_JWT_AUDIENCE}
+      SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL}
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      VOICE_WORKER_SECRET: ${VOICE_WORKER_SECRET}
+      CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS}
+      DAILY_TEXT_MSG_CAP: ${DAILY_TEXT_MSG_CAP:-50}
+      DAILY_VOICE_SECONDS_CAP: ${DAILY_VOICE_SECONDS_CAP:-600}
+      PER_CALL_MAX_SECONDS: ${PER_CALL_MAX_SECONDS:-300}
+      DAILY_VOICE_MINUTES_GLOBAL: ${DAILY_VOICE_MINUTES_GLOBAL:-500}
+      DAILY_COST_CEILING_USD: ${DAILY_COST_CEILING_USD:-20.0}
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/v1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - mwc
+
+  # ── Voice worker (LiveKit Agents) ──────────────────────────────────
+  voice-worker:
+    build:
+      context: .
+      dockerfile: apps/voice-worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: ${DATABASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY}
+      ANTHROPIC_COMPANION_MODEL: ${ANTHROPIC_COMPANION_MODEL}
+      ANTHROPIC_HAIKU_MODEL: ${ANTHROPIC_HAIKU_MODEL}
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_JWT_AUDIENCE: ${SUPABASE_JWT_AUDIENCE}
+      SUPABASE_JWKS_URL: ${SUPABASE_JWKS_URL}
+      LIVEKIT_URL: ${LIVEKIT_URL}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      CARTESIA_API_KEY: ${CARTESIA_API_KEY}
+      VOICE_WORKER_SECRET: ${VOICE_WORKER_SECRET}
+      # Voice worker reaches the API over the docker network (same compose
+      # network), so it uses the service name instead of the public domain.
+      # Saves a TLS roundtrip and works even if DNS is broken.
+      API_BASE_URL: http://api:8000
+    depends_on:
+      api:
+        condition: service_healthy
+    networks:
+      - mwc
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  mwc:
+    driver: bridge
