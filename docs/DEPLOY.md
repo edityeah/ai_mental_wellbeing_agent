@@ -1,220 +1,256 @@
-# Deployment — Oracle Cloud Always Free + Docker Compose
+# Deployment — Cloudflare Tunnel + Mac (zero monthly cost)
 
-Single VM. All three services (web, API, voice worker) + Caddy reverse proxy as Docker containers. **$0/month forever** (modulo your Supabase usage, which stays on free tier for now).
+This is the deployment path the production app currently runs on. A MacBook at home runs all three services as Docker containers; Cloudflare Tunnel exposes them to the public internet without opening any ports on your router.
 
-Stack:
+| | |
+|---|---|
+| **Cost** | $0/month (you pay your home electricity + ISP, which you pay anyway) |
+| **Always-on requirement** | Mac must stay on. Sleep = site down. |
+| **Latency** | Mumbai-edge via Cloudflare → ~20-50ms from anywhere in India |
+| **TLS** | Cloudflare handles cert provisioning + renewal at the edge |
+| **Public ports on Mac** | Zero (tunnel is outbound only) |
 
-| Service | What | Where |
-|---|---|---|
-| **Caddy** | TLS termination + reverse proxy | Container on VM |
-| **Web** (Next.js 15) | The app | Container on VM |
-| **API** (FastAPI) | Backend | Container on VM |
-| **Voice Worker** (Python) | LiveKit Agents worker | Container on VM |
-| **Database** | Postgres | Supabase managed (free tier) |
+If you'd rather pay a few dollars and not babysit, this same `docker-compose.tunnel.yml` (with minor port tweaks) runs identically on Render, Railway, DigitalOcean, Hetzner, etc.
 
-## 1. Provision the VM on Oracle Cloud
+---
 
-1. Sign in to Oracle Cloud dashboard. Pick **Mumbai (ap-mumbai-1)** as region (top-right region selector). If Mumbai is full, try **Hyderabad (ap-hyderabad-1)**.
-2. **Compute → Instances → Create Instance**.
-3. Settings:
-   - **Name**: `wellbeing-vm`
-   - **Image & shape**: Click **Edit** next to "Image and shape"
-     - Change shape to **Ampere** (the ARM A1 family). Shape: **VM.Standard.A1.Flex**.
-     - Configure: **4 OCPUs, 24 GB RAM** (use all the free allowance).
-     - Image: **Canonical Ubuntu 22.04** (or 24.04 if available).
-   - **Networking**: leave the default VCN. Make sure **"Assign a public IPv4 address"** is checked.
-   - **Add SSH keys**: Paste your public key (`cat ~/.ssh/id_ed25519.pub`). If you don't have one, generate: `ssh-keygen -t ed25519`.
-   - **Boot volume**: 100 GB is fine (free tier covers 200 GB total).
-4. Click **Create**.
-5. If you get "Out of host capacity" → wait a few minutes and retry, or switch region to Hyderabad. Provisioning Mumbai can take a few attempts; it eventually works.
-6. Once running, note the **Public IPv4 address** (something like `140.238.X.X`).
+## Prerequisites
 
-### Open the firewall at the cloud level
-
-Oracle blocks all ports by default at the VCN security list (separate from the VM's own UFW). Open 80, 443, 22:
-
-1. **Networking → Virtual Cloud Networks → vcn-2026... → Security Lists → Default Security List**.
-2. **Add Ingress Rules**:
-   - Source: `0.0.0.0/0`, Protocol: TCP, Dest Port: `22` (SSH)
-   - Source: `0.0.0.0/0`, Protocol: TCP, Dest Port: `80` (HTTP / Caddy ACME)
-   - Source: `0.0.0.0/0`, Protocol: TCP, Dest Port: `443` (HTTPS)
-   - Source: `0.0.0.0/0`, Protocol: UDP, Dest Port: `443` (HTTP/3)
-3. **Add Ingress Rules** for each → Save.
-
-## 2. SSH in and bootstrap
+- Mac with **Docker Desktop** installed and running
+- Domain managed by Cloudflare (zone added, name servers pointed at Cloudflare)
+- Accounts: Supabase, Anthropic, LiveKit Cloud, Deepgram, Cartesia
+- Supabase production Postgres provisioned (any free-tier project works)
+- `cloudflared` CLI installed via Homebrew
 
 ```bash
-ssh ubuntu@<VM_PUBLIC_IP>
-sudo bash <(curl -sSL https://raw.githubusercontent.com/edityeah/ai_mental_wellbeing_agent/main/infra/bootstrap.sh)
+brew install cloudflared
 ```
 
-The bootstrap script:
-- Installs Docker + Docker Compose
-- Enables UFW (firewall — allows 22, 80, 443)
-- Hardens SSH (disables root/password auth)
-- Installs fail2ban
-- Creates a `deploy` user
-- Clones the repo into `/opt/wellbeing`
+---
 
-When it finishes, log in as the deploy user:
+## 1. Migrate the production Postgres schema
+
+From your laptop, against your Supabase project's **session pooler** (port 5432 — DDL needs session mode):
+
 ```bash
-ssh deploy@<VM_PUBLIC_IP>
-cd /opt/wellbeing
+cd apps/api
+DATABASE_URL='postgresql+asyncpg://postgres.<ref>:<pwd>@aws-<region>.pooler.supabase.com:5432/postgres' \
+  uv run alembic upgrade head
 ```
 
-## 3. Point DNS at the VM
+You should see migrations `0001 → 0006` apply. Verify the table list:
 
-At your domain registrar (or wherever `adityeah.ai` DNS lives — likely Cloudflare):
-
-| Type | Host | Value |
-|---|---|---|
-| A | `wellbeing` | `<VM_PUBLIC_IP>` |
-| A | `api` | `<VM_PUBLIC_IP>` |
-
-If using Cloudflare for DNS: **set the proxy mode to DNS-only (gray cloud)**, not proxied (orange). Caddy needs to reach Let's Encrypt directly on port 80 for the HTTP-01 challenge. You can switch to proxied later if you want CF's DDoS protection.
-
-Wait 5–10 min for DNS to propagate. Verify:
 ```bash
-dig +short wellbeing.adityeah.ai
-dig +short api.adityeah.ai
-# Both should return the VM's public IP.
+psql 'postgresql://postgres.<ref>:<pwd>@aws-<region>.pooler.supabase.com:5432/postgres' \
+  -c "\dt public.*"
 ```
 
-## 4. Set secrets
+Expected: `users`, `conversations`, `messages`, `user_profiles`, `voice_sessions`, `usage_daily`, `mood_checkins`, `alembic_version`.
 
-On the VM:
+## 2. Set up the Cloudflare Tunnel
+
+### Authenticate
+
 ```bash
-cd /opt/wellbeing
+cloudflared tunnel login
+```
+
+Opens your browser, asks you to select the zone you want the tunnel attached to. Click your domain → Authorize. A cert is saved to `~/.cloudflared/cert.pem`.
+
+### Create the tunnel
+
+```bash
+cloudflared tunnel create wellbeing
+```
+
+Prints something like:
+
+```
+Tunnel credentials written to /Users/<you>/.cloudflared/<UUID>.json
+Created tunnel wellbeing with id <UUID>
+```
+
+Note the UUID — you'll need it in the config below.
+
+### Write the routing config
+
+```bash
+cat > ~/.cloudflared/config.yml <<'EOF'
+tunnel: <UUID-from-above>
+credentials-file: /Users/<you>/.cloudflared/<UUID-from-above>.json
+
+ingress:
+  - hostname: wellbeing.<yourdomain>
+    service: http://localhost:3000
+  - hostname: api.<yourdomain>
+    service: http://localhost:8000
+  - service: http_status:404
+EOF
+```
+
+### Point DNS at the tunnel
+
+```bash
+cloudflared tunnel route dns wellbeing wellbeing.<yourdomain>
+cloudflared tunnel route dns wellbeing api.<yourdomain>
+```
+
+Each prints "Added CNAME ... which will route to this tunnel". Done.
+
+## 3. Configure environment
+
+Build the production `.env` at the repo root. The template is at `.env.production.example`:
+
+```bash
 cp .env.production.example .env
 nano .env
 ```
 
-Fill in every value. Reference your local `apps/api/.env` for the matching values (Anthropic, Supabase, LiveKit, Deepgram, Cartesia, VOICE_WORKER_SECRET).
+Fill in every value. Critical ones:
 
-For `DATABASE_URL`, use the Supabase **transaction pooler** (port 6543) for runtime:
-```
-postgresql+asyncpg://postgres.<ref>:<pwd>@aws-1-ap-northeast-2.pooler.supabase.com:6543/postgres
-```
+- `DATABASE_URL` → Supabase **transaction pooler** (port 6543) for app traffic
+- `NEXT_PUBLIC_API_URL=https://api.<yourdomain>`
+- `CORS_ALLOWED_ORIGINS=https://wellbeing.<yourdomain>`
+- All Anthropic/LiveKit/Deepgram/Cartesia keys
+- `VOICE_WORKER_SECRET` — any 32+ char random string
 
-Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X`).
-
-## 5. Run migrations
-
-If you haven't migrated the Supabase prod DB yet (from local was already done earlier), skip this. Otherwise:
+## 4. Bring up the stack
 
 ```bash
-# Use the SESSION pooler (port 5432) for migrations, NOT the transaction pooler.
-docker run --rm \
-  -e DATABASE_URL='postgresql+asyncpg://postgres.<ref>:<pwd>@aws-1-ap-northeast-2.pooler.supabase.com:5432/postgres' \
-  -e ANTHROPIC_API_KEY=dummy -e ANTHROPIC_COMPANION_MODEL=x -e ANTHROPIC_HAIKU_MODEL=x \
-  -e SUPABASE_URL='https://<ref>.supabase.co' -e SUPABASE_ANON_KEY=dummy \
-  -e SUPABASE_JWT_AUDIENCE=authenticated \
-  -e SUPABASE_JWKS_URL='https://<ref>.supabase.co/auth/v1/.well-known/jwks.json' \
-  -v $(pwd):/app -w /app/apps/api \
-  python:3.12-slim \
-  bash -c "pip install -q uv && uv sync --no-dev && uv run alembic upgrade head"
+docker compose -f docker-compose.tunnel.yml up -d --build
 ```
 
-## 6. Boot everything
+First build is ~5 minutes (Next.js standalone build + Python deps). Subsequent rebuilds are faster.
+
+Verify each container:
 
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.tunnel.yml ps
 ```
 
-First build takes ~5 minutes (downloads images, installs Python deps, builds Next.js). Subsequent rebuilds are faster due to layer caching.
+You should see:
+- `web` → Up (port `127.0.0.1:3000`)
+- `api` → Up, healthy (port `127.0.0.1:8000`)
+- `voice-worker` → Up (no port; outbound to LiveKit)
 
-Watch logs:
+If the worker isn't registering, `docker compose logs voice-worker` will show why (usually missing API key or wrong `LIVEKIT_URL`).
+
+## 5. Run the tunnel as a persistent service
+
+We use a launchd User Agent so the tunnel auto-starts at login and self-restarts if it crashes:
+
+Create `~/Library/LaunchAgents/com.adityeah.cloudflared-wellbeing.plist`:
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.adityeah.cloudflared-wellbeing</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/cloudflared</string>
+        <string>tunnel</string>
+        <string>run</string>
+        <string>wellbeing</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/<you></string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>WorkingDirectory</key>
+    <string>/Users/<you></string>
+    <key>StandardOutPath</key>
+    <string>/Users/<you>/Library/Logs/wellbeing/cloudflared.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/<you>/Library/Logs/wellbeing/cloudflared.err.log</string>
+</dict>
+</plist>
+```
+
+Then:
+
 ```bash
-docker compose -f docker-compose.prod.yml logs -f
+mkdir -p ~/Library/Logs/wellbeing
+launchctl load ~/Library/LaunchAgents/com.adityeah.cloudflared-wellbeing.plist
+launchctl list | grep cloudflared
 ```
 
-You're looking for:
-- **Caddy**: `serving initial configuration` and TLS cert acquisition for both domains.
-- **API**: `Application startup complete.`
-- **Web**: `Ready in ...`
-- **Voice worker**: `registered worker {"agent_name": "companion", ...}`
+Tunnel is now resilient to crashes and Mac reboots.
 
-If Caddy can't get a cert, the most likely cause is DNS not propagating yet — wait 5 more min and check `dig +short wellbeing.adityeah.ai` again.
+## 6. Mac sleep settings
 
-## 7. Supabase Auth redirect
+- **System Settings → Battery → Options** → "Prevent automatic sleeping on power adapter when the display is off" → **On**
+- For MacBook lid-closed operation without an external monitor, install [Amphetamine](https://apps.apple.com/in/app/amphetamine/id937984704) (free, App Store) and set it to keep Mac awake while running.
+
+## 7. Docker Desktop autostart
+
+- Docker Desktop → Settings → General → **"Start Docker Desktop when you log in"** → ✅
+
+Containers have `restart: unless-stopped` in `docker-compose.tunnel.yml`, so they auto-resume whenever Docker Desktop starts.
+
+## 8. Supabase Auth URL Configuration
 
 Supabase dashboard → **Authentication → URL Configuration**:
-- **Site URL**: `https://wellbeing.adityeah.ai`
-- **Redirect URLs**: add `https://wellbeing.adityeah.ai/auth/callback`
 
-## 8. Smoke test
+- **Site URL**: `https://wellbeing.<yourdomain>`
+- **Redirect URLs**: add `https://wellbeing.<yourdomain>/auth/callback`
 
-In a private/incognito browser:
-1. Open `https://wellbeing.adityeah.ai` — should load with valid HTTPS cert.
-2. Sign in via magic link (from `Wellbeing <wellbeing@adityeah.ai>`).
-3. Walk through onboarding → land in chat.
-4. Send a text message → should stream a response.
-5. Place a voice call → should connect, agent greets, transcripts appear in the thread.
+Without this, magic-link emails from production redirect to localhost.
+
+## 9. Smoke test
+
+In a private/incognito window:
+
+1. Open `https://wellbeing.<yourdomain>` — should load with valid TLS cert.
+2. Sign in via magic link (email from your branded sender via Resend).
+3. Walk onboarding → land on chat.
+4. Send a text message → token-by-token reply.
+5. Place a voice call → connects, agent greets, live transcripts in the thread.
 6. End the call → Care Plan card appears.
-7. Check `/insights` and `/profile`.
 
-## Ongoing operations
-
-### Deploy a new version (after `git push`):
+## Updating the deployed app
 
 ```bash
-ssh deploy@<VM_IP>
-cd /opt/wellbeing
-./infra/deploy.sh
+cd ~/Documents/Mental\ Wellbeing\ Agent
+git pull
+docker compose -f docker-compose.tunnel.yml up -d --build
 ```
 
-Or set up GitHub Actions to do this automatically on push to `main`. Ask if you want this — I'll wire it.
+That's it. Docker rebuilds only changed services. Cloudflare Tunnel is independent of the containers — won't bounce.
 
-### Watch logs
+## Watching logs
 
 ```bash
-docker compose -f docker-compose.prod.yml logs -f caddy
-docker compose -f docker-compose.prod.yml logs -f api
-docker compose -f docker-compose.prod.yml logs -f voice-worker
-docker compose -f docker-compose.prod.yml logs -f web
+docker compose -f docker-compose.tunnel.yml logs -f api
+docker compose -f docker-compose.tunnel.yml logs -f web
+docker compose -f docker-compose.tunnel.yml logs -f voice-worker
+tail -f ~/Library/Logs/wellbeing/cloudflared.log
 ```
-
-### Restart a single service
-
-```bash
-docker compose -f docker-compose.prod.yml restart api
-```
-
-### Update the OS (do this monthly)
-
-```bash
-sudo apt update && sudo apt upgrade -y
-sudo reboot   # if a kernel update was applied
-```
-
-### Check resource usage
-
-```bash
-docker stats        # live CPU/mem per container
-free -h             # system memory
-df -h               # disk
-```
-
-## Backups
-
-Supabase free tier includes **daily backups with 7-day retention** — handled for you. Profile/conversation/recap data is safe.
-
-The VM's local Docker volumes (`caddy_data`, `caddy_config`) only contain TLS certs — Caddy can re-acquire them at any time, so no backup needed.
 
 ## Common gotchas
 
-- **Cert provisioning fails on first boot**: DNS isn't propagated yet. Wait. Caddy retries automatically.
-- **"Out of host capacity" on Oracle**: known issue with Always Free Ampere. Keep retrying; switch to Hyderabad if Mumbai stays full.
-- **Voice worker crashes on boot**: check `LIVEKIT_URL` includes `wss://`; check all 4 API keys (Anthropic, Deepgram, Cartesia, LiveKit) are non-empty in `.env`.
-- **`Failed to fetch` errors in browser console**: `CORS_ALLOWED_ORIGINS` doesn't match the web origin exactly. Must be `https://wellbeing.adityeah.ai` (no trailing slash).
-- **Magic link redirects to `localhost:3000` in prod**: Supabase Auth URL Configuration wasn't updated (step 7).
-- **Container restart loop**: `docker compose -f docker-compose.prod.yml logs <service>` will show why. Most often it's a missing env var.
+- **Site loads 502 right after deploy**: the web container is still starting (Next.js standalone init takes ~2-3 sec). Wait a few seconds.
+- **API container "unhealthy"**: check `docker compose logs api` — usually `DATABASE_URL` malformed or wrong Supabase password.
+- **Voice worker reconnect loop**: `LIVEKIT_URL` must start with `wss://`, and the four AI keys must all be set.
+- **CORS errors in browser console**: `CORS_ALLOWED_ORIGINS` doesn't match the web origin exactly. Must be `https://wellbeing.<yourdomain>`, no trailing slash, no path.
+- **Magic link goes to localhost in prod**: Supabase Auth URL Configuration not updated.
+- **Mac shell exports empty `ANTHROPIC_API_KEY=`**: this silently overrides the `.env` file (Docker Compose precedence). Unset before running compose, or trust the `env_ignore_empty=True` in the API's settings.
 
-## Security checklist (post-deploy)
+## Security checklist
 
-- [ ] Rotate Supabase DB password (it was pasted in chat history).
-- [ ] Confirm SSH password auth is disabled: `sudo grep PasswordAuthentication /etc/ssh/sshd_config` → should say `no`.
-- [ ] Confirm UFW is active: `sudo ufw status` → should show `Status: active`, with only 22/80/443.
-- [ ] Set up an uptime monitor (UptimeRobot free) on `https://wellbeing.adityeah.ai` — they'll email you if the site goes down.
-- [ ] Enable Supabase 2FA on your account.
-- [ ] Lock down Oracle Cloud account with 2FA.
+- [ ] Rotate Supabase DB password if it's ever been pasted in a chat / log / screenshot
+- [ ] Supabase 2FA enabled
+- [ ] Cloudflare 2FA enabled
+- [ ] Set up an uptime monitor (UptimeRobot free) on `https://wellbeing.<yourdomain>`
+- [ ] Periodically review `~/Library/Logs/wellbeing/cloudflared.err.log` for unusual errors
