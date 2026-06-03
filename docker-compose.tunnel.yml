@@ -60,7 +60,10 @@ services:
       DAILY_VOICE_MINUTES_GLOBAL: ${DAILY_VOICE_MINUTES_GLOBAL:-500}
       DAILY_COST_CEILING_USD: ${DAILY_COST_CEILING_USD:-20.0}
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8000/api/v1/health || exit 1"]
+      # Use Python (always present) instead of wget (not in python:3.12-slim).
+      test:
+        - "CMD-SHELL"
+        - "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/api/v1/health\", timeout=3).status==200 else 1)'"
       interval: 30s
       timeout: 5s
       retries: 3

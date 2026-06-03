@@ -47,8 +47,12 @@ export function AppSidebar() {
     title: string;
   } | null>(null);
 
-  // Refresh on mount and whenever path changes (so creating/renaming/deleting
-  // a conversation from anywhere keeps the sidebar fresh).
+  // Fetch conversations ONCE on mount. Don't refetch on every route
+  // change — that was producing a fresh network round-trip (through the
+  // tunnel, through the home ISP, through the Mac, into Docker) on every
+  // single sidebar→canvas nav, making the UI feel sluggish for ~no
+  // benefit. The sidebar owns conversation CRUD itself, so it can keep
+  // its state coherent without polling.
   const refresh = useCallback(async () => {
     try {
       const list = await api.listConversations();
@@ -60,15 +64,41 @@ export function AppSidebar() {
 
   useEffect(() => {
     void refresh();
-  }, [refresh, pathname]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Single-flight guard for new-conversation clicks.
   const creating = useRef(false);
+
+  /** A conversation is "empty / unused" if no messages have been
+   * appended to it. `last_msg_at` is initialized to `created_at` at
+   * creation time and only advances when append_message runs, so equal
+   * timestamps (within a couple seconds, allowing for clock skew) means
+   * zero messages. */
+  function findEmptyConversation(
+    convs: ConversationOut[],
+  ): ConversationOut | null {
+    for (const c of convs) {
+      const created = new Date(c.created_at).getTime();
+      const lastMsg = new Date(c.last_msg_at).getTime();
+      if (Math.abs(lastMsg - created) < 2000) return c;
+    }
+    return null;
+  }
 
   async function handleNew() {
     if (creating.current) return;
     creating.current = true;
     try {
+      // If the user already has an empty/unused conversation, reuse it
+      // instead of creating yet another row. Avoids the "ten empty
+      // 'New conversation' threads" mess.
+      const existing = findEmptyConversation(conversations);
+      if (existing) {
+        closeDrawer();
+        router.push(`/chat/${existing.id}` as Route);
+        return;
+      }
       const c = await api.createConversation();
       setConversations((prev) => [c, ...prev]);
       closeDrawer();

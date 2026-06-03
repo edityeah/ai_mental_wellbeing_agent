@@ -59,8 +59,9 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
         return;
       }
       setMe(meRes);
-      // If we landed on /chat with no id and there are existing
-      // conversations, jump into the latest one.
+      // If we landed on /chat with no id, fetch conversations to pick
+      // the latest. If we already have an id from the URL we don't need
+      // the full list — the sidebar surfaces it independently.
       if (!initialId) {
         try {
           const convs = await api.listConversations();
@@ -69,6 +70,17 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
           }
         } catch {
           /* not critical — sidebar will surface convs */
+        }
+      } else {
+        // We have an id from the URL. Fetch just this conversation's
+        // title so the header shows it. Falls back silently if endpoint
+        // missing.
+        try {
+          const all = await api.listConversations();
+          const c = all.find((x) => x.id === initialId);
+          if (c) setActiveTitle(c.title);
+        } catch {
+          /* keep default title */
         }
       }
     })().catch(console.error);
@@ -83,13 +95,13 @@ export function ChatScreen({ initialId }: { initialId: string | null }) {
       return;
     }
     (async () => {
-      const [msgs, convs] = await Promise.all([
-        api.listMessages(activeId),
-        api.listConversations(),
-      ]);
+      // Only fetch the messages for the active conversation. The title
+      // is set from `activeConvTitle` (passed by listConversations once,
+      // not refetched on every nav) — listing all conversations on
+      // every active-id change made navigation feel sluggish through
+      // the tunnel (extra round-trip on every sidebar click).
+      const msgs = await api.listMessages(activeId);
       setMessages(msgs);
-      const conv = convs.find((c) => c.id === activeId);
-      setActiveTitle(conv?.title || "New conversation");
       setStreamingText(null);
       setSendError(null);
     })().catch(console.error);
